@@ -76,7 +76,7 @@ const MESSAGE_TRANSMITTER_V2_ABI = [
 
 let provider, signer, userAddress;
 let history = [];
-let latestBalances = { USDC: null, EURC: null };
+let latestBalances = { USDC: null, EURC: null, CIRBTC: null };
 let pendingMint = null;
 let pendingBurn = null; // { txHash, dest, amt } — set when attestation isn't ready yet, so "Check attestation again" can retry without re-burning
 
@@ -170,7 +170,7 @@ async function connectWallet() {
 
 function disconnectWallet() {
   provider = null; signer = null; userAddress = null;
-  latestBalances = { USDC: null, EURC: null };
+  latestBalances = { USDC: null, EURC: null, CIRBTC: null };
   pendingMint = null;
   try { localStorage.setItem("thorpay_disconnected", "1"); } catch (e) {}
 
@@ -379,7 +379,6 @@ async function refreshBalances() {
   setText("usdcBal", formatBal(usdc));
   setText("eurcBal", formatBal(eurc));
   setText("totalBalance", "$" + formatBal(Math.max(0, (usdc || 0) + (eurc || 0))));
-  setText("swapFromBal", "Balance: " + formatBal(usdc));
   setText("bridgeFromBal", "Balance: " + formatBal(usdc));
   setText("sendBal", "Balance: " + formatBal(document.getElementById("sendToken")?.value === "EURC" ? eurc : usdc));
 
@@ -401,6 +400,7 @@ async function refreshBalances() {
     await sleep(150);
     try {
       const cirbtc = await tokenBalance(CONFIG.CIRBTC_ERC20);
+      latestBalances.CIRBTC = cirbtc;
       setText("cirbtcBal", formatBal(cirbtc));
       document.getElementById("cirbtcBal")?.classList.remove("disabled");
       setText("cirbtcSub", "Arc Testnet");
@@ -408,6 +408,8 @@ async function refreshBalances() {
       console.error("cirBTC balance fetch failed", e);
     }
   }
+
+  document.dispatchEvent(new CustomEvent("thorpay:balances"));
 }
 
 async function refreshDestinationBalance() {
