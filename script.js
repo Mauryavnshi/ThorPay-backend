@@ -409,11 +409,12 @@ async function refreshBalances() {
     }
   }
 
-  // Swap panel's "Balance: ..." line — depends on whichever token is
-  // currently selected in the From dropdown (USDC / EURC / cirBTC), so it
-  // has to be refreshed here once every balance has been fetched, same as
-  // it's refreshed below whenever that dropdown changes.
+  // Swap panel's "Balance: ..." lines (both From and To sides) — depend on
+  // whichever token is currently selected in each dropdown (USDC / EURC /
+  // cirBTC), so they have to be refreshed here once every balance has been
+  // fetched, same as they're refreshed below whenever either dropdown changes.
   updateSwapFromBal();
+  updateSwapToBal();
 
   document.dispatchEvent(new CustomEvent("thorpay:balances"));
 }
@@ -423,8 +424,15 @@ function updateSwapFromBal() {
   const sym = sel ? sel.value : "USDC";
   setText("swapFromBal", "Balance: " + formatBal(latestBalances[sym]));
 }
+function updateSwapToBal() {
+  const sel = document.getElementById("swapToToken");
+  const sym = sel ? sel.value : "EURC";
+  setText("swapToBal", "Balance: " + formatBal(latestBalances[sym]));
+}
 const swapFromTokenSel = document.getElementById("swapFromToken");
 if (swapFromTokenSel) swapFromTokenSel.addEventListener("change", updateSwapFromBal);
+const swapToTokenSel = document.getElementById("swapToToken");
+if (swapToTokenSel) swapToTokenSel.addEventListener("change", updateSwapToBal);
 
 async function refreshDestinationBalance() {
   const chainSel = document.getElementById("bridgeToChain");
@@ -503,6 +511,7 @@ if (swapFlip) {
     const b = document.getElementById("swapToToken");
     const tmp = a.value; a.value = b.value; b.value = tmp;
     a.dispatchEvent(new Event("change"));
+    b.dispatchEvent(new Event("change"));
   });
 }
 
