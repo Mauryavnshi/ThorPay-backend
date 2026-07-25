@@ -301,10 +301,37 @@ if (switchNetworkBtn) {
 /* -------------------------------------------------------------------------
    Balances — always read through the ERC-20 interface (6 decimals) per
    Arc's own guidance, rather than the native 18-decimal gas balance.
+
+   IMPORTANT: reads go through window.ethereum.request({method:"eth_call"})
+   directly — NOT through ethers' Web3Provider, and NOT through a raw
+   JsonRpcProvider fetch() to Arc's RPC URL either. Two separate problems
+   ruled those out:
+     1. ethers' Web3Provider does automatic network detection that hangs
+        on Arc's unlisted chain ID (5042002) on some MetaMask builds.
+     2. A plain browser fetch() straight to Arc's public RPC can get
+        blocked by CORS — that endpoint isn't necessarily configured to
+        allow arbitrary page-level requests, even though MetaMask itself
+        (a browser extension, not a page fetch) can still reach it fine,
+        which is why signed transactions kept working the whole time.
+   Going through window.ethereum.request() sidesteps both: MetaMask does
+   the actual RPC call on its own side, no CORS, no ethers network probe.
    ------------------------------------------------------------------------- */
-async function tokenBalance(tokenAddress, customProvider) {
-  const c = new ethers.Contract(tokenAddress, ERC20_ABI, customProvider || provider);
-  const [raw, decimals] = await Promise.all([c.balanceOf(userAddress), c.decimals()]);
+const ERC20_IFACE = new ethers.utils.Interface(ERC20_ABI);
+
+async function ethCallViaWallet(tokenAddress, fnName, args = []) {
+  const data = ERC20_IFACE.encodeFunctionData(fnName, args);
+  const result = await window.ethereum.request({
+    method: "eth_call",
+    params: [{ to: tokenAddress, data }, "latest"]
+  });
+  return ERC20_IFACE.decodeFunctionResult(fnName, result)[0];
+}
+
+async function tokenBalance(tokenAddress) {
+  const [raw, decimals] = await Promise.all([
+    ethCallViaWallet(tokenAddress, "balanceOf", [userAddress]),
+    ethCallViaWallet(tokenAddress, "decimals")
+  ]);
   return Number(ethers.utils.formatUnits(raw, decimals));
 }
 
@@ -343,8 +370,10 @@ async function refreshBalances() {
 
   if (usdc === null || eurc === null) {
     const welcome = document.getElementById("welcomeMsg");
+    const reason = (usdcResult.reason || eurcResult.reason);
+    const reasonMsg = reason ? (reason.message || String(reason)).slice(0, 140) : "unknown error";
     if (welcome) {
-      welcome.innerText = "Couldn't load balance — check you're on Arc Testnet in MetaMask and reload.";
+      welcome.innerText = "Couldn't load balance — " + reasonMsg;
       welcome.style.color = "var(--red)";
     }
   }
@@ -746,5 +775,10 @@ window.ThorPay = {
   getBalance: (symbol) => latestBalances[symbol] ?? null,
   formatBal,
   refreshBalances,
-  addHistory
+  addHistory,
+  getGasPrice: async () => {
+    const hex = await window.ethereum.request({ method: "eth_gasPrice" });
+    return ethers.BigNumber.from(hex);
+  },
+  nativeDecimals: CONFIG.nativeCurrency.decimals
 };
