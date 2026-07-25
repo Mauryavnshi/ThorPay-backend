@@ -62,10 +62,8 @@ app.use(cors({
 const TOKENS = {
   USDC: { address: "0x3600000000000000000000000000000000000000", decimals: 6 },
   EURC: { address: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a", decimals: 6 },
-  // Added by request — untested against Circle App Kit's estimateSwap/swap,
-  // since App Kit's StableFX pairs are historically stablecoin<->stablecoin
-  // (USDC/EURC/etc). A BTC-denominated leg may simply be rejected by Circle's
-  // side even though it's accepted here. Try a small quote first.
+  // Confirmed via https://docs.arc.io/app-kit/references/supported-blockchains —
+  // Arc Testnet Swap officially supports exactly USDC, EURC, and cirBTC.
   CIRBTC: { address: "0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF", decimals: 8 }
 };
 
@@ -93,10 +91,11 @@ let relayerAdapter = null;
 async function getRelayerAdapter() {
   if (relayerAdapter) return relayerAdapter;
   const adapterModule = require("@circle-fin/adapter-viem-v2");
-  // Circle's own docs show this export under two different names across
-  // pages (createAdapterFromPrivateKey / createViemAdapterFromPrivateKey) —
-  // support both instead of guessing which version is installed.
-  const factory = adapterModule.createAdapterFromPrivateKey || adapterModule.createViemAdapterFromPrivateKey;
+  // Confirmed via https://docs.arc.io/app-kit/quickstarts/swap-tokens-same-chain —
+  // createViemAdapterFromPrivateKey is the official name. Falling back to
+  // createAdapterFromPrivateKey just in case an older/newer package version
+  // renamed it.
+  const factory = adapterModule.createViemAdapterFromPrivateKey || adapterModule.createAdapterFromPrivateKey;
   if (!factory) {
     throw new Error("Could not find a private-key adapter factory in @circle-fin/adapter-viem-v2 — check the installed version's exports.");
   }
@@ -179,6 +178,33 @@ app.post("/api/quote", rateLimit, async (req, res) => {
   } catch (err) {
     console.error("quote failed", err);
     res.status(502).json({ error: "Quote failed: " + (err.message || String(err)) });
+  }
+});
+
+/* -------------------------------------------------------------------------
+   GET /api/rates — cached USD prices for USDC/EURC/cirBTC on Arc Testnet.
+   Much cheaper than a full quote (no adapter/signing involved) — good for
+   showing a live "≈ $X" hint under the amount fields as the user types,
+   per https://docs.arc.io/app-kit/tutorials/swap/get-token-rates
+   ------------------------------------------------------------------------- */
+let ratesCache = { data: null, fetchedAt: 0 };
+const RATES_CACHE_MS = 30 * 1000; // Circle's own cache already refreshes periodically; avoid hammering it further
+
+app.get("/api/rates", rateLimit, async (req, res) => {
+  try {
+    if (ratesCache.data && Date.now() - ratesCache.fetchedAt < RATES_CACHE_MS) {
+      return res.json(ratesCache.data);
+    }
+    const result = await kit.getTokenRates({
+      chain: "Arc_Testnet",
+      tokens: ["USDC", "EURC", "CIRBTC"],
+      kitKey: process.env.KIT_KEY || undefined
+    });
+    ratesCache = { data: result, fetchedAt: Date.now() };
+    res.json(result);
+  } catch (err) {
+    console.error("rates failed", err);
+    res.status(502).json({ error: "Rates failed: " + (err.message || String(err)) });
   }
 });
 
