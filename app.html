@@ -77,7 +77,7 @@
     <div class="field">
       <div class="flabel">From</div>
       <div class="row">
-        <input type="number" id="swapFromAmt" placeholder="0.00" min="0" step="any" />
+        <input type="number" id="swapFromAmt" placeholder="0.00" min="0" step="0.000001" />
         <select id="swapFromToken"><option value="USDC">USDC</option><option value="EURC">EURC</option></select>
       </div>
       <div class="balrow"><span id="swapFromBal">Balance: 0.00</span>
@@ -138,7 +138,7 @@
     <div class="field">
       <div class="flabel">From</div>
       <div class="row">
-        <input type="number" id="bridgeFromAmt" placeholder="0.00" min="0" step="any" />
+        <input type="number" id="bridgeFromAmt" placeholder="0.00" min="0" step="0.000001" />
         <select id="bridgeFromToken"><option value="USDC">USDC</option></select>
       </div>
       <div class="balrow"><span id="bridgeFromBal">Balance: 0.00</span></div>
@@ -184,7 +184,7 @@
     <div class="field">
       <div class="flabel">From</div>
       <div class="row">
-        <input type="number" id="sendAmt" placeholder="0.00" min="0" step="any" />
+        <input type="number" id="sendAmt" placeholder="0.00" min="0" step="0.000001" />
         <select id="sendToken"><option value="USDC">USDC</option><option value="EURC">EURC</option></select>
       </div>
       <div class="balrow"><span id="sendBal">Balance: 0.00</span>
@@ -278,8 +278,8 @@
   // relayer payout), so this covers both at a conservative gas estimate.
   async function estimateGasFee() {
     try {
-      if (!window.ThorPay || !window.ThorPay.arcReadProvider) return "\u2014";
-      const gasPrice = await window.ThorPay.arcReadProvider.getGasPrice();
+      if (!window.ThorPay || !window.ThorPay.getGasPrice) return "\u2014";
+      const gasPrice = await window.ThorPay.getGasPrice();
       const cost = gasPrice.mul(130000); // ERC20 transfer, roughly
       const decimals = window.ThorPay.nativeDecimals || 18;
       return "~" + Number(ethers.utils.formatUnits(cost, decimals)).toFixed(4) + " USDC";
