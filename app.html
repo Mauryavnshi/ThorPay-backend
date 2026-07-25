@@ -110,6 +110,7 @@
       <div class="row">
         <input type="number" id="slippageCustomInput" placeholder="e.g. 2.5" min="0" max="50" step="0.1" />
       </div>
+      <div class="usd-hint" id="slippageCustomStatus" style="margin-top:4px;"></div>
     </div>
 
     <div class="route-box">
@@ -308,12 +309,17 @@
   });
 
   const slippageCustomInput = document.getElementById("slippageCustomInput");
+  const slippageCustomStatus = document.getElementById("slippageCustomStatus");
   if (slippageCustomInput) {
     slippageCustomInput.addEventListener("input", () => {
       const v = Number(slippageCustomInput.value);
-      if (v > 0 && v <= 50) {
+      if (slippageCustomInput.value && v > 0 && v <= 50) {
         selectedSlippage = v;
+        if (slippageCustomStatus) { slippageCustomStatus.innerText = "\u2713 Applied — " + v + "% slippage"; slippageCustomStatus.style.color = "var(--green, #2ecc71)"; }
         scheduleEstimate();
+      } else if (slippageCustomStatus) {
+        slippageCustomStatus.innerText = slippageCustomInput.value ? "Enter a value between 0 and 50" : "";
+        slippageCustomStatus.style.color = "var(--red)";
       }
     });
   }
