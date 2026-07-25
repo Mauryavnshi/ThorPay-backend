@@ -302,36 +302,55 @@ if (switchNetworkBtn) {
    Balances — always read through the ERC-20 interface (6 decimals) per
    Arc's own guidance, rather than the native 18-decimal gas balance.
 
-   IMPORTANT: reads go through window.ethereum.request({method:"eth_call"})
-   directly — NOT through ethers' Web3Provider, and NOT through a raw
-   JsonRpcProvider fetch() to Arc's RPC URL either. Two separate problems
-   ruled those out:
-     1. ethers' Web3Provider does automatic network detection that hangs
-        on Arc's unlisted chain ID (5042002) on some MetaMask builds.
-     2. A plain browser fetch() straight to Arc's public RPC can get
-        blocked by CORS — that endpoint isn't necessarily configured to
-        allow arbitrary page-level requests, even though MetaMask itself
-        (a browser extension, not a page fetch) can still reach it fine,
-        which is why signed transactions kept working the whole time.
-   Going through window.ethereum.request() sidesteps both: MetaMask does
-   the actual RPC call on its own side, no CORS, no ethers network probe.
+   Reads go through window.ethereum.request({method:"eth_call"}) directly —
+   NOT through ethers' Web3Provider (network detection hangs on Arc's
+   unlisted chain ID on some MetaMask builds) and NOT through a raw
+   JsonRpcProvider fetch() (blocked by CORS on Arc's public RPC).
+
+   The actual failure seen in testing was neither of those — it was Arc's
+   public testnet RPC returning "request limit reached" (error -32011)
+   when hit with several eth_call requests in a burst. Two fixes for that:
+     1. Decimals are fixed for a known ERC-20 (never change), so they're
+        hardcoded below instead of fetched — that alone halves the call
+        count for every balance check.
+     2. Calls run one at a time with a short gap, and retry with backoff
+        specifically on a rate-limit response, instead of firing every
+        token's balance check simultaneously.
    ------------------------------------------------------------------------- */
 const ERC20_IFACE = new ethers.utils.Interface(ERC20_ABI);
+const TOKEN_DECIMALS = {
+  [CONFIG.USDC_ERC20.toLowerCase()]: 6,
+  [CONFIG.EURC_ERC20.toLowerCase()]: 6
+};
+if (CONFIG.CIRBTC_ERC20) TOKEN_DECIMALS[CONFIG.CIRBTC_ERC20.toLowerCase()] = 8;
 
-async function ethCallViaWallet(tokenAddress, fnName, args = []) {
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function isRateLimitError(err) {
+  const msg = ((err && err.message) || String(err)).toLowerCase();
+  return err?.code === -32011 || msg.includes("request limit") || msg.includes("rate limit") || msg.includes("too many requests");
+}
+
+async function ethCallViaWallet(tokenAddress, fnName, args = [], attempt = 0) {
   const data = ERC20_IFACE.encodeFunctionData(fnName, args);
-  const result = await window.ethereum.request({
-    method: "eth_call",
-    params: [{ to: tokenAddress, data }, "latest"]
-  });
-  return ERC20_IFACE.decodeFunctionResult(fnName, result)[0];
+  try {
+    const result = await window.ethereum.request({
+      method: "eth_call",
+      params: [{ to: tokenAddress, data }, "latest"]
+    });
+    return ERC20_IFACE.decodeFunctionResult(fnName, result)[0];
+  } catch (err) {
+    if (isRateLimitError(err) && attempt < 3) {
+      await sleep(600 * (attempt + 1)); // 600ms, 1200ms, 1800ms backoff
+      return ethCallViaWallet(tokenAddress, fnName, args, attempt + 1);
+    }
+    throw err;
+  }
 }
 
 async function tokenBalance(tokenAddress) {
-  const [raw, decimals] = await Promise.all([
-    ethCallViaWallet(tokenAddress, "balanceOf", [userAddress]),
-    ethCallViaWallet(tokenAddress, "decimals")
-  ]);
+  const decimals = TOKEN_DECIMALS[tokenAddress.toLowerCase()] ?? 6;
+  const raw = await ethCallViaWallet(tokenAddress, "balanceOf", [userAddress]);
   return Number(ethers.utils.formatUnits(raw, decimals));
 }
 
@@ -345,18 +364,12 @@ async function readOnlyBalance(rpcUrl, tokenAddress, address) {
 async function refreshBalances() {
   if (!provider || !userAddress) return;
 
-  // Fetch USDC and EURC independently so one failing doesn't blank out the other,
-  // and surface the failure on screen instead of only logging to console.
-  const [usdcResult, eurcResult] = await Promise.allSettled([
-    tokenBalance(CONFIG.USDC_ERC20),
-    tokenBalance(CONFIG.EURC_ERC20)
-  ]);
-
-  const usdc = usdcResult.status === "fulfilled" ? usdcResult.value : null;
-  const eurc = eurcResult.status === "fulfilled" ? eurcResult.value : null;
-
-  if (usdcResult.status === "rejected") console.error("USDC balance fetch failed", usdcResult.reason);
-  if (eurcResult.status === "rejected") console.error("EURC balance fetch failed", eurcResult.reason);
+  // One at a time, with a small gap — avoids bursting Arc's public RPC
+  // rate limit the way Promise.all's simultaneous requests did.
+  let usdc = null, eurc = null, usdcErr = null, eurcErr = null;
+  try { usdc = await tokenBalance(CONFIG.USDC_ERC20); } catch (e) { usdcErr = e; console.error("USDC balance fetch failed", e); }
+  await sleep(150);
+  try { eurc = await tokenBalance(CONFIG.EURC_ERC20); } catch (e) { eurcErr = e; console.error("EURC balance fetch failed", e); }
 
   latestBalances.USDC = usdc;
   latestBalances.EURC = eurc;
@@ -368,18 +381,22 @@ async function refreshBalances() {
   setText("bridgeFromBal", "Balance: " + formatBal(usdc));
   setText("sendBal", "Balance: " + formatBal(document.getElementById("sendToken")?.value === "EURC" ? eurc : usdc));
 
+  const welcome = document.getElementById("welcomeMsg");
   if (usdc === null || eurc === null) {
-    const welcome = document.getElementById("welcomeMsg");
-    const reason = (usdcResult.reason || eurcResult.reason);
+    const reason = usdcErr || eurcErr;
     const reasonMsg = reason ? (reason.message || String(reason)).slice(0, 140) : "unknown error";
     if (welcome) {
       welcome.innerText = "Couldn't load balance — " + reasonMsg;
       welcome.style.color = "var(--red)";
     }
+  } else if (welcome) {
+    welcome.innerText = "Welcome back";
+    welcome.style.color = "";
   }
 
   // cirBTC — only wired up once Arc publishes a public contract address.
   if (CONFIG.CIRBTC_ERC20) {
+    await sleep(150);
     try {
       const cirbtc = await tokenBalance(CONFIG.CIRBTC_ERC20);
       setText("cirbtcBal", formatBal(cirbtc));
