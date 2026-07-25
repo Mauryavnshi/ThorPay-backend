@@ -78,7 +78,7 @@
       <div class="flabel">From</div>
       <div class="row">
         <input type="number" id="swapFromAmt" placeholder="0.00" min="0" step="0.000001" />
-        <select id="swapFromToken"><option value="USDC">USDC</option><option value="EURC">EURC</option></select>
+        <select id="swapFromToken"><option value="USDC">USDC</option><option value="EURC">EURC</option><option value="CIRBTC">cirBTC</option></select>
       </div>
       <div class="balrow"><span id="swapFromBal">Balance: 0.00</span>
         <div class="pct"><span data-pct="25">25%</span><span data-pct="50">50%</span><span data-pct="75">75%</span><span data-pct="100">100%</span></div>
@@ -89,7 +89,7 @@
       <div class="flabel">To</div>
       <div class="row">
         <input type="text" id="swapToAmt" placeholder="0.00" disabled />
-        <select id="swapToToken"><option value="EURC">EURC</option><option value="USDC">USDC</option></select>
+        <select id="swapToToken"><option value="EURC">EURC</option><option value="USDC">USDC</option><option value="CIRBTC">cirBTC</option></select>
       </div>
       <div class="balrow"><span id="swapToBal">Balance: 0.00</span></div>
     </div>
@@ -356,10 +356,23 @@
 
   const fromAmtEl = document.getElementById("swapFromAmt");
   if (fromAmtEl) fromAmtEl.addEventListener("input", scheduleEstimate);
+
+  function updateSwapBalances() {
+    if (!window.ThorPay) return;
+    const fromSym = document.getElementById("swapFromToken").value;
+    const toSym = document.getElementById("swapToToken").value;
+    const fromBalEl = document.getElementById("swapFromBal");
+    const toBalEl = document.getElementById("swapToBal");
+    if (fromBalEl) fromBalEl.innerText = "Balance: " + window.ThorPay.formatBal(window.ThorPay.getBalance(fromSym));
+    if (toBalEl) toBalEl.innerText = "Balance: " + window.ThorPay.formatBal(window.ThorPay.getBalance(toSym));
+  }
+  updateSwapBalances();
+
   ["swapFromToken", "swapToToken"].forEach(id => {
     const el = document.getElementById(id);
-    if (el) el.addEventListener("change", scheduleEstimate);
+    if (el) el.addEventListener("change", () => { updateSwapBalances(); scheduleEstimate(); });
   });
+  document.addEventListener("thorpay:balances", updateSwapBalances);
 
   const swapBtn = document.getElementById("swapBtn");
   if (swapBtn) {
@@ -384,7 +397,8 @@
 
       const TOKEN_ADDRESSES = {
         USDC: "0x3600000000000000000000000000000000000000",
-        EURC: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a"
+        EURC: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
+        CIRBTC: "0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF"
       };
       const ERC20_ABI = [
         "function transfer(address to, uint256 amount) returns (bool)",
