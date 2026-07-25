@@ -94,6 +94,18 @@ function formatBal(n) {
 }
 
 /* -------------------------------------------------------------------------
+   Amount inputs — block negative values as the person types, not just on
+   submit (the min="0" HTML attribute alone doesn't stop manual typing of "-").
+   ------------------------------------------------------------------------- */
+["swapFromAmt", "bridgeFromAmt", "sendAmt"].forEach(id => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener("input", () => {
+    if (el.value !== "" && Number(el.value) < 0) el.value = "0";
+  });
+});
+
+/* -------------------------------------------------------------------------
    Tab switching (app.html only — no-ops harmlessly if elements don't exist)
    ------------------------------------------------------------------------- */
 document.querySelectorAll("[data-tab]").forEach(el => {
@@ -126,7 +138,7 @@ async function connectWallet() {
     await window.ethereum.request({ method: "eth_requestAccounts" });
     await ensureArcNetwork();
 
-    provider = new ethers.providers.Web3Provider(window.ethereum);
+    provider = new ethers.providers.Web3Provider(window.ethereum, "any");
     signer = provider.getSigner();
     userAddress = await signer.getAddress();
 
@@ -276,7 +288,7 @@ if (switchNetworkBtn) {
   switchNetworkBtn.addEventListener("click", async () => {
     try {
       await ensureArcNetwork();
-      provider = new ethers.providers.Web3Provider(window.ethereum);
+      provider = new ethers.providers.Web3Provider(window.ethereum, "any");
       signer = provider.getSigner();
       await checkNetwork();
       await refreshBalances();
@@ -525,7 +537,7 @@ if (bridgeMintBtn) {
       statusEl.className = "status"; statusEl.innerText = "Switching MetaMask to " + pendingMint.dest.name + "...";
       await switchOrAddChain(pendingMint.dest);
 
-      const destProvider = new ethers.providers.Web3Provider(window.ethereum);
+      const destProvider = new ethers.providers.Web3Provider(window.ethereum, "any");
       const destSigner = destProvider.getSigner();
       const transmitter = new ethers.Contract(CONFIG.MESSAGE_TRANSMITTER_V2, MESSAGE_TRANSMITTER_V2_ABI, destSigner);
 
@@ -542,7 +554,7 @@ if (bridgeMintBtn) {
 
       // Switch back to Arc so the rest of the app keeps working normally.
       await ensureArcNetwork();
-      provider = new ethers.providers.Web3Provider(window.ethereum);
+      provider = new ethers.providers.Web3Provider(window.ethereum, "any");
       signer = provider.getSigner();
       await checkNetwork();
       await refreshBalances();
@@ -683,7 +695,7 @@ if (window.ethereum) {
       disconnectWallet();
       return;
     }
-    provider = new ethers.providers.Web3Provider(window.ethereum);
+    provider = new ethers.providers.Web3Provider(window.ethereum, "any");
     signer = provider.getSigner();
     userAddress = accounts[0];
     if (connectBtn) connectBtn.innerText = userAddress.slice(0, 6) + "..." + userAddress.slice(-4);
@@ -695,7 +707,7 @@ if (window.ethereum) {
 
   window.ethereum.on("chainChanged", async () => {
     if (!userAddress) return; // not connected yet — nothing to update
-    provider = new ethers.providers.Web3Provider(window.ethereum);
+    provider = new ethers.providers.Web3Provider(window.ethereum, "any");
     signer = provider.getSigner();
     const correct = await checkNetwork();
     if (correct) await refreshBalances();
