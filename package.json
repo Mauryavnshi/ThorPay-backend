@@ -1,0 +1,22 @@
+{
+  "name": "thorpay-swap-relayer",
+  "version": "1.0.0",
+  "description": "Small server-side relayer that lets ThorPay's static frontend run real USDC <-> EURC swaps on Arc Testnet via Circle App Kit, which requires a server-side signer for Swap.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@circle-fin/adapter-viem-v2": "latest",
+    "@circle-fin/app-kit": "latest",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "ethers": "^5.7.2",
+    "express": "^4.19.2",
+    "viem": "^2.21.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
