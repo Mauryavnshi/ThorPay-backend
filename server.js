@@ -88,6 +88,14 @@ console.log("  " + relayerWallet.address);
 const kit = new AppKit();
 let relayerAdapter = null;
 
+const { createPublicClient, http } = require("viem");
+let ArcTestnetChain = null;
+try {
+  ({ ArcTestnet: ArcTestnetChain } = require("@circle-fin/app-kit/chains"));
+} catch (e) {
+  console.warn("Could not load ArcTestnet chain definition from @circle-fin/app-kit/chains — falling back to App Kit's default chain resolution.", e.message);
+}
+
 async function getRelayerAdapter() {
   if (relayerAdapter) return relayerAdapter;
   const adapterModule = require("@circle-fin/adapter-viem-v2");
@@ -99,7 +107,18 @@ async function getRelayerAdapter() {
   if (!factory) {
     throw new Error("Could not find a private-key adapter factory in @circle-fin/adapter-viem-v2 — check the installed version's exports.");
   }
-  relayerAdapter = factory({ privateKey: process.env.RELAYER_PRIVATE_KEY });
+  // App Kit's own default RPC connection for Arc Testnet was throwing
+  // "Network connection failed for Arc Testnet" on every swap/quote call.
+  // Per https://docs.arc.io/app-kit/tutorials/adapter-setups, overriding
+  // getPublicClient with our own RPC (same ARC_RPC_URL used elsewhere in
+  // this file) fixes that.
+  relayerAdapter = factory({
+    privateKey: process.env.RELAYER_PRIVATE_KEY,
+    getPublicClient: ({ chain }) => createPublicClient({
+      chain: ArcTestnetChain || chain,
+      transport: http(ARC_RPC_URL, { retryCount: 3, timeout: 15000 })
+    })
+  });
   return relayerAdapter;
 }
 
