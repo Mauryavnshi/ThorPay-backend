@@ -104,18 +104,18 @@
     </div>
 
     <div class="route-box">
-      <div class="rline"><span>Route</span><span>Swap relayer · Circle App Kit</span></div>
+      <div class="rline"><span>Route</span><span>Circle App Kit · your wallet</span></div>
       <div class="rline"><span>Status</span><span id="swapRouteStatus">Enter an amount to see a quote</span></div>
       <div class="rline"><span>Min. received</span><span id="swapMinReceived">—</span></div>
       <div class="rline"><span>Est. network fee</span><span id="swapGasFee">—</span></div>
     </div>
 
     <details class="advanced-toggle">
-      <summary>Advanced — relayer server URL</summary>
+      <summary>Advanced — Circle Kit Key</summary>
       <div class="field" style="margin-top:8px;">
-        <div class="flabel">Relayer URL (your deployed backend)</div>
+        <div class="flabel">Kit Key (free from console.circle.com/api-keys — saved only in this browser)</div>
         <div class="row">
-          <input type="text" id="swapRelayerUrl" placeholder="https://your-relayer.onrender.com" style="font-size:13px;font-weight:500;" />
+          <input type="text" id="swapKitKey" placeholder="KIT_KEY:xxxxxxxx:xxxxxxxx" style="font-size:13px;font-weight:500;" />
         </div>
       </div>
     </details>
@@ -123,12 +123,11 @@
     <button class="btn btn-primary btn-block" id="swapBtn" disabled>Connect wallet to swap</button>
     <div class="status" id="swapStatus"></div>
     <!--
-      Swap needs a server-side signer per Circle's own App Kit rules, so
-      execution goes through ThorPay's own small relayer backend (see
-      /thorpay-backend in the repo) instead of calling Circle directly from
-      the browser, which fails with a CORS/network error. Deploy that
-      backend once (Render/Vercel), paste its URL into "Advanced" above,
-      and it's saved in this browser for next time.
+      Swap runs entirely in the browser via Circle's App Kit SDK
+      (createViemAdapterFromProvider), signed directly by the connected
+      wallet — no relayer backend, no custodial hop. Requires a free Kit Key
+      from console.circle.com/api-keys, pasted under "Advanced" above (kept
+      in localStorage only, never in this file).
     -->
   </div>
 
@@ -226,227 +225,214 @@
 <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
 <script src="script.js"></script>
 
-<!-- Swap — talks to ThorPay's own relayer backend (see /thorpay-backend),
-     which holds the server-side signer Circle's App Kit requires for Swap.
-     No AppKit code runs in the browser at all anymore — this is a plain
-     fetch() to your deployed backend. Depends on window.ThorPay exposed at
-     the bottom of script.js for wallet state + shared UI helpers. -->
-<script>
-(function () {
-  let selectedSlippage = 0.5; // percent
-  let cachedRelayerAddress = null;
-  let cachedRelayerUrl = null;
+<!-- Swap — runs directly through Circle's App Kit SDK in the browser, signed by
+     the connected wallet itself (createViemAdapterFromProvider). No relayer
+     backend, no custodial hop — this is the same pattern Circle's own browser-
+     wallet quickstarts use. Needs a free Kit Key from console.circle.com,
+     pasted under "Advanced" (kept in localStorage only). Depends on
+     window.ThorPay exposed at the bottom of script.js for wallet-connection
+     state + shared UI helpers.
 
-  const relayerUrlInput = document.getElementById("swapRelayerUrl");
-  if (relayerUrlInput) {
-    const saved = localStorage.getItem("thorpay_relayer_url");
-    if (saved) relayerUrlInput.value = saved;
-    relayerUrlInput.addEventListener("change", () => {
-      localStorage.setItem("thorpay_relayer_url", relayerUrlInput.value.trim());
-      cachedRelayerAddress = null; // force re-fetch of config for the new backend
-      scheduleEstimate();
-    });
-  }
+     esm.sh serves @circle-fin/app-kit / @circle-fin/adapter-viem-v2 as browser
+     ES modules on the fly — versions aren't pinned here, so if this ever
+     breaks after an upstream release, pin exact versions
+     (e.g. @circle-fin/app-kit@X.Y.Z) once you check npm for current numbers. -->
+<script type="module">
+import { AppKit } from "https://esm.sh/@circle-fin/app-kit";
+import { createViemAdapterFromProvider } from "https://esm.sh/@circle-fin/adapter-viem-v2";
 
-  function getRelayerUrl() {
-    const v = (relayerUrlInput && relayerUrlInput.value.trim()) || "";
-    return v.replace(/\/+$/, "");
-  }
+const kit = new AppKit();
 
-  async function getRelayerConfig() {
-    const url = getRelayerUrl();
-    if (!url) throw new Error("Paste your relayer backend URL under \u201cAdvanced\u201d first.");
-    if (cachedRelayerAddress && cachedRelayerUrl === url) return cachedRelayerAddress;
-    const res = await fetch(url + "/api/config");
-    if (!res.ok) throw new Error("Couldn't reach relayer config endpoint (HTTP " + res.status + ").");
-    const data = await res.json();
-    cachedRelayerAddress = data.relayerAddress;
-    cachedRelayerUrl = url;
-    return cachedRelayerAddress;
-  }
+// Dropdown value -> the token alias App Kit expects. Everything else in this
+// file (balances, the <select> values) keeps using "CIRBTC" internally;
+// this is the only place that needs to know App Kit spells it "cirBTC".
+const TOKEN_ALIAS = { USDC: "USDC", EURC: "EURC", CIRBTC: "cirBTC" };
 
-  document.querySelectorAll("#slippageChips span").forEach(chip => {
-    chip.addEventListener("click", () => {
-      document.querySelectorAll("#slippageChips span").forEach(c => c.classList.remove("active"));
-      chip.classList.add("active");
-      selectedSlippage = Number(chip.dataset.slip);
-      scheduleEstimate();
-    });
+let selectedSlippage = 0.5; // percent
+let cachedAdapter = null;
+let cachedProvider = null;
+
+async function getAdapter() {
+  if (!window.ethereum) throw new Error("No browser wallet found (MetaMask, Rabby, etc).");
+  if (cachedAdapter && cachedProvider === window.ethereum) return cachedAdapter;
+  cachedAdapter = await createViemAdapterFromProvider({ provider: window.ethereum });
+  cachedProvider = window.ethereum;
+  return cachedAdapter;
+}
+
+const kitKeyInput = document.getElementById("swapKitKey");
+if (kitKeyInput) {
+  const saved = localStorage.getItem("thorpay_kit_key");
+  if (saved) kitKeyInput.value = saved;
+  kitKeyInput.addEventListener("change", () => {
+    localStorage.setItem("thorpay_kit_key", kitKeyInput.value.trim());
+    scheduleEstimate();
   });
+}
+function getKitKey() {
+  return (kitKeyInput && kitKeyInput.value.trim()) || "";
+}
 
-  // Arc's gas token IS USDC, so a rough gas estimate can be shown in USDC
-  // directly. Two on-chain legs happen for a swap here (deposit transfer +
-  // relayer payout), so this covers both at a conservative gas estimate.
-  async function estimateGasFee() {
-    try {
-      if (!window.ThorPay || !window.ThorPay.getGasPrice) return "\u2014";
-      const gasPrice = await window.ThorPay.getGasPrice();
-      const cost = gasPrice.mul(130000); // ERC20 transfer, roughly
-      const decimals = window.ThorPay.nativeDecimals || 18;
-      return "~" + Number(ethers.utils.formatUnits(cost, decimals)).toFixed(4) + " USDC";
-    } catch (e) {
-      console.warn("gas estimate failed", e);
-      return "\u2014";
+document.querySelectorAll("#slippageChips span").forEach(chip => {
+  chip.addEventListener("click", () => {
+    document.querySelectorAll("#slippageChips span").forEach(c => c.classList.remove("active"));
+    chip.classList.add("active");
+    selectedSlippage = Number(chip.dataset.slip);
+    scheduleEstimate();
+  });
+});
+
+async function estimateGasFee() {
+  try {
+    if (!window.ThorPay || !window.ThorPay.getGasPrice) return "\u2014";
+    const gasPrice = await window.ThorPay.getGasPrice();
+    const cost = gasPrice.mul(130000);
+    const decimals = window.ThorPay.nativeDecimals || 18;
+    return "~" + Number(ethers.utils.formatUnits(cost, decimals)).toFixed(4) + " USDC";
+  } catch (e) {
+    console.warn("gas estimate failed", e);
+    return "\u2014";
+  }
+}
+
+let estimateTimer = null;
+function scheduleEstimate() {
+  clearTimeout(estimateTimer);
+  estimateTimer = setTimeout(runEstimate, 500);
+}
+
+async function runEstimate() {
+  const routeStatus = document.getElementById("swapRouteStatus");
+  const minReceivedEl = document.getElementById("swapMinReceived");
+  const gasFeeEl = document.getElementById("swapGasFee");
+  const toAmt = document.getElementById("swapToAmt");
+  const amt = document.getElementById("swapFromAmt").value;
+  const tokenIn = document.getElementById("swapFromToken").value;
+  const tokenOut = document.getElementById("swapToToken").value;
+
+  if (!window.ThorPay || !window.ThorPay.getUserAddress()) {
+    if (routeStatus) routeStatus.innerText = "Connect your wallet to see a live quote";
+    return;
+  }
+  if (!getKitKey()) {
+    if (routeStatus) routeStatus.innerText = "Paste your free Kit Key under \u201cAdvanced\u201d to get quotes";
+    return;
+  }
+  if (tokenIn === tokenOut) {
+    toAmt.value = "";
+    if (routeStatus) routeStatus.innerText = "Pick two different tokens";
+    if (minReceivedEl) minReceivedEl.innerText = "\u2014";
+    return;
+  }
+  if (!amt || Number(amt) <= 0) {
+    toAmt.value = "";
+    if (routeStatus) routeStatus.innerText = "Enter an amount to see a quote";
+    if (minReceivedEl) minReceivedEl.innerText = "\u2014";
+    return;
+  }
+
+  if (gasFeeEl) estimateGasFee().then(fee => { gasFeeEl.innerText = fee; });
+
+  try {
+    if (routeStatus) routeStatus.innerText = "Fetching quote\u2026";
+    const adapter = await getAdapter();
+    const estimate = await kit.estimateSwap({
+      from: { adapter, chain: "Arc_Testnet" },
+      tokenIn: TOKEN_ALIAS[tokenIn],
+      tokenOut: TOKEN_ALIAS[tokenOut],
+      amountIn: amt,
+      config: {
+        slippageBps: Math.round(selectedSlippage * 100),
+        kitKey: getKitKey()
+      }
+    });
+
+    const outAmount = Number(estimate.estimatedOutput.amount);
+    toAmt.value = outAmount.toFixed(6);
+    if (routeStatus) routeStatus.innerText = "\u2248 " + outAmount.toFixed(6) + " " + tokenOut;
+    if (minReceivedEl) {
+      const minReceived = outAmount * (1 - selectedSlippage / 100);
+      minReceivedEl.innerText = minReceived.toFixed(6) + " " + tokenOut + " (" + selectedSlippage + "% slippage)";
     }
+  } catch (err) {
+    console.error("quote failed", err);
+    toAmt.value = "";
+    if (minReceivedEl) minReceivedEl.innerText = "\u2014";
+    if (routeStatus) routeStatus.innerText = "Couldn't fetch a quote: " + (err.message || err);
   }
+}
 
-  let estimateTimer = null;
-  function scheduleEstimate() {
-    clearTimeout(estimateTimer);
-    estimateTimer = setTimeout(runEstimate, 500);
-  }
+const fromAmtEl = document.getElementById("swapFromAmt");
+if (fromAmtEl) fromAmtEl.addEventListener("input", scheduleEstimate);
 
-  async function runEstimate() {
-    const routeStatus = document.getElementById("swapRouteStatus");
-    const minReceivedEl = document.getElementById("swapMinReceived");
-    const gasFeeEl = document.getElementById("swapGasFee");
-    const toAmt = document.getElementById("swapToAmt");
+function updateSwapBalances() {
+  if (!window.ThorPay) return;
+  const fromSym = document.getElementById("swapFromToken").value;
+  const toSym = document.getElementById("swapToToken").value;
+  const fromBalEl = document.getElementById("swapFromBal");
+  const toBalEl = document.getElementById("swapToBal");
+  if (fromBalEl) fromBalEl.innerText = "Balance: " + window.ThorPay.formatBal(window.ThorPay.getBalance(fromSym));
+  if (toBalEl) toBalEl.innerText = "Balance: " + window.ThorPay.formatBal(window.ThorPay.getBalance(toSym));
+}
+updateSwapBalances();
+
+["swapFromToken", "swapToToken"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("change", () => { updateSwapBalances(); scheduleEstimate(); });
+});
+document.addEventListener("thorpay:balances", updateSwapBalances);
+
+const swapBtn = document.getElementById("swapBtn");
+if (swapBtn) {
+  swapBtn.addEventListener("click", async () => {
+    const statusEl = document.getElementById("swapStatus");
+    const userAddress = window.ThorPay && window.ThorPay.getUserAddress();
+    if (!userAddress) { statusEl.className = "status err"; statusEl.innerText = "Connect your wallet first."; return; }
+    if (!getKitKey()) { statusEl.className = "status err"; statusEl.innerText = "Paste your free Kit Key under \u201cAdvanced\u201d first (get one at console.circle.com/api-keys)."; return; }
+
     const amt = document.getElementById("swapFromAmt").value;
     const tokenIn = document.getElementById("swapFromToken").value;
     const tokenOut = document.getElementById("swapToToken").value;
+    if (!amt || Number(amt) <= 0) { statusEl.className = "status err"; statusEl.innerText = "Enter an amount."; return; }
+    if (tokenIn === tokenOut) { statusEl.className = "status err"; statusEl.innerText = "Choose two different tokens."; return; }
 
-    if (!window.ThorPay || !window.ThorPay.getUserAddress()) {
-      if (routeStatus) routeStatus.innerText = "Connect your wallet to see a live quote";
-      return;
-    }
-    if (!getRelayerUrl()) {
-      if (routeStatus) routeStatus.innerText = "Paste your relayer backend URL under \u201cAdvanced\u201d to get quotes";
-      return;
-    }
-    if (tokenIn === tokenOut) {
-      toAmt.value = "";
-      if (routeStatus) routeStatus.innerText = "Pick two different tokens";
-      if (minReceivedEl) minReceivedEl.innerText = "\u2014";
-      return;
-    }
-    if (!amt || Number(amt) <= 0) {
-      toAmt.value = "";
-      if (routeStatus) routeStatus.innerText = "Enter an amount to see a quote";
-      if (minReceivedEl) minReceivedEl.innerText = "\u2014";
+    const available = window.ThorPay.getBalance(tokenIn);
+    if (available !== null && Number(amt) > available) {
+      statusEl.className = "status err";
+      statusEl.innerText = "Insufficient balance. You have " + window.ThorPay.formatBal(available) + " " + tokenIn + " available.";
       return;
     }
 
-    if (gasFeeEl) estimateGasFee().then(fee => { gasFeeEl.innerText = fee; });
-
+    swapBtn.disabled = true;
     try {
-      if (routeStatus) routeStatus.innerText = "Fetching quote\u2026";
-      const url = getRelayerUrl();
-      const res = await fetch(url + "/api/quote", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tokenIn, tokenOut, amountIn: amt })
+      statusEl.className = "status"; statusEl.innerText = "Confirm the swap in your wallet\u2026";
+      const adapter = await getAdapter();
+      const result = await kit.swap({
+        from: { adapter, chain: "Arc_Testnet" },
+        tokenIn: TOKEN_ALIAS[tokenIn],
+        tokenOut: TOKEN_ALIAS[tokenOut],
+        amountIn: amt,
+        config: {
+          slippageBps: Math.round(selectedSlippage * 100),
+          kitKey: getKitKey()
+        }
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
 
-      const outAmount = Number(data.estimatedOutput?.amount ?? data.amountOut);
-      toAmt.value = outAmount.toFixed(4);
-      if (routeStatus) routeStatus.innerText = "\u2248 " + outAmount.toFixed(4) + " " + tokenOut;
-      if (minReceivedEl) {
-        const minReceived = outAmount * (1 - selectedSlippage / 100);
-        minReceivedEl.innerText = minReceived.toFixed(4) + " " + tokenOut + " (" + selectedSlippage + "% slippage)";
-      }
+      statusEl.className = "status ok";
+      statusEl.innerText = "Swapped! Received " + result.amountOut + " " + tokenOut + ". Tx: " + result.txHash;
+      window.ThorPay.addHistory("SWAP", amt + " " + tokenIn + " \u2192 " + result.amountOut + " " + tokenOut, result.txHash);
+      await window.ThorPay.refreshBalances();
+      document.getElementById("swapFromAmt").value = "";
+      document.getElementById("swapToAmt").value = "";
     } catch (err) {
-      console.error("quote failed", err);
-      toAmt.value = "";
-      if (minReceivedEl) minReceivedEl.innerText = "\u2014";
-      if (routeStatus) routeStatus.innerText = "Couldn't fetch a quote: " + (err.message || err);
+      console.error("swap failed", err);
+      statusEl.className = "status err";
+      statusEl.innerText = "Swap failed: " + (err.message || err);
+    } finally {
+      swapBtn.disabled = false;
     }
-  }
-
-  const fromAmtEl = document.getElementById("swapFromAmt");
-  if (fromAmtEl) fromAmtEl.addEventListener("input", scheduleEstimate);
-
-  function updateSwapBalances() {
-    if (!window.ThorPay) return;
-    const fromSym = document.getElementById("swapFromToken").value;
-    const toSym = document.getElementById("swapToToken").value;
-    const fromBalEl = document.getElementById("swapFromBal");
-    const toBalEl = document.getElementById("swapToBal");
-    if (fromBalEl) fromBalEl.innerText = "Balance: " + window.ThorPay.formatBal(window.ThorPay.getBalance(fromSym));
-    if (toBalEl) toBalEl.innerText = "Balance: " + window.ThorPay.formatBal(window.ThorPay.getBalance(toSym));
-  }
-  updateSwapBalances();
-
-  ["swapFromToken", "swapToToken"].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.addEventListener("change", () => { updateSwapBalances(); scheduleEstimate(); });
   });
-  document.addEventListener("thorpay:balances", updateSwapBalances);
-
-  const swapBtn = document.getElementById("swapBtn");
-  if (swapBtn) {
-    swapBtn.addEventListener("click", async () => {
-      const statusEl = document.getElementById("swapStatus");
-      const userAddress = window.ThorPay && window.ThorPay.getUserAddress();
-      const signer = window.ThorPay && window.ThorPay.getSigner();
-      if (!userAddress || !signer) { statusEl.className = "status err"; statusEl.innerText = "Connect your wallet first."; return; }
-
-      const amt = document.getElementById("swapFromAmt").value;
-      const tokenIn = document.getElementById("swapFromToken").value;
-      const tokenOut = document.getElementById("swapToToken").value;
-      if (!amt || Number(amt) <= 0) { statusEl.className = "status err"; statusEl.innerText = "Enter an amount."; return; }
-      if (tokenIn === tokenOut) { statusEl.className = "status err"; statusEl.innerText = "Choose two different tokens."; return; }
-
-      const available = window.ThorPay.getBalance(tokenIn);
-      if (available !== null && Number(amt) > available) {
-        statusEl.className = "status err";
-        statusEl.innerText = "Insufficient balance. You have " + window.ThorPay.formatBal(available) + " " + tokenIn + " available.";
-        return;
-      }
-
-      const TOKEN_ADDRESSES = {
-        USDC: "0x3600000000000000000000000000000000000000",
-        EURC: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
-        CIRBTC: "0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF"
-      };
-      const ERC20_ABI = [
-        "function transfer(address to, uint256 amount) returns (bool)",
-        "function decimals() view returns (uint8)"
-      ];
-
-      swapBtn.disabled = true;
-      try {
-        statusEl.className = "status"; statusEl.innerText = "Looking up relayer address\u2026";
-        const relayerAddress = await getRelayerConfig();
-
-        statusEl.innerText = "Step 1/2 \u2014 confirm the deposit to the relayer in MetaMask\u2026";
-        const tokenContract = new ethers.Contract(TOKEN_ADDRESSES[tokenIn], ERC20_ABI, signer);
-        const decimals = await tokenContract.decimals();
-        const depositTx = await tokenContract.transfer(relayerAddress, ethers.utils.parseUnits(amt, decimals));
-        statusEl.innerText = "Deposit sent, waiting for confirmation\u2026";
-        await depositTx.wait();
-
-        statusEl.innerText = "Step 2/2 \u2014 relayer is running the swap\u2026";
-        const url = getRelayerUrl();
-        const res = await fetch(url + "/api/swap", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            depositTxHash: depositTx.hash,
-            tokenIn, tokenOut, amountIn: amt,
-            recipient: userAddress
-          })
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
-
-        statusEl.className = "status ok";
-        statusEl.innerText = "Swapped! Received " + data.amountOut + " " + tokenOut + ". Payout tx: " + data.payoutTxHash;
-        window.ThorPay.addHistory("SWAP", amt + " " + tokenIn + " \u2192 " + data.amountOut + " " + tokenOut, data.payoutTxHash);
-        await window.ThorPay.refreshBalances();
-        document.getElementById("swapFromAmt").value = "";
-        document.getElementById("swapToAmt").value = "";
-      } catch (err) {
-        console.error("swap failed", err);
-        statusEl.className = "status err";
-        statusEl.innerText = "Swap failed: " + (err.message || err);
-      } finally {
-        swapBtn.disabled = false;
-      }
-    });
-  }
-})();
+}
 </script>
 </body>
 </html>
