@@ -77,7 +77,7 @@
     <div class="field">
       <div class="flabel">From</div>
       <div class="row">
-        <input type="number" id="swapFromAmt" placeholder="0.00" />
+        <input type="number" id="swapFromAmt" placeholder="0.00" min="0" step="any" />
         <select id="swapFromToken"><option value="USDC">USDC</option><option value="EURC">EURC</option></select>
       </div>
       <div class="balrow"><span id="swapFromBal">Balance: 0.00</span>
@@ -105,12 +105,12 @@
     </div>
     <button class="btn btn-primary btn-block" id="swapBtn" disabled>Connect wallet to swap</button>
     <div class="status" id="swapStatus"></div>
-    <div class="hint">
-      Swap runs on Circle's <b>App Kit SDK</b> (<code>kit.swap()</code>) loaded straight from
-      <a href="https://esm.sh/@circle-fin/app-kit" target="_blank">esm.sh/@circle-fin/app-kit</a> — no bundler
-      needed. A kit key from <a href="https://console.circle.com" target="_blank">console.circle.com</a> is optional;
-      swaps still work without one, it's only needed if you want your app attributed for custom fees.
-    </div>
+    <!--
+      Swap runs on Circle's App Kit SDK (kit.swap()), loaded from
+      https://esm.sh/@circle-fin/app-kit — no bundler needed. A kit key from
+      console.circle.com is optional; swaps still work without one, it's
+      only needed if you want your app attributed for custom fees.
+    -->
   </div>
 
   <!-- BRIDGE -->
@@ -119,7 +119,7 @@
     <div class="field">
       <div class="flabel">From</div>
       <div class="row">
-        <input type="number" id="bridgeFromAmt" placeholder="0.00" />
+        <input type="number" id="bridgeFromAmt" placeholder="0.00" min="0" step="any" />
         <select id="bridgeFromToken"><option value="USDC">USDC</option></select>
       </div>
       <div class="balrow"><span id="bridgeFromBal">Balance: 0.00</span></div>
@@ -145,13 +145,14 @@
     <button class="btn btn-primary btn-block" id="bridgeMintBtn" style="display:none;margin-top:8px;">Complete mint on destination chain</button>
     <div class="status" id="bridgeStatus"></div>
     <div class="hint" id="bridgeProgress" style="display:none;"></div>
-    <div class="hint">
-      This burns real USDC on Arc Testnet through Circle's TokenMessengerV2, waits for Circle's Iris
-      attestation, then — once you click "Complete mint" — switches MetaMask to your destination chain
-      and calls <code>receiveMessage</code> on that chain's MessageTransmitterV2 for you. CCTP V2 testnet
-      contracts share the same address across chains, so this is verified safe on Ethereum Sepolia and
-      Base Sepolia. Your MetaMask will briefly switch networks during the mint step, then switch back.
-    </div>
+    <!--
+      This burns real USDC on Arc Testnet through Circle's TokenMessengerV2, waits for
+      Circle's Iris attestation, then — once you click "Complete mint" — switches MetaMask
+      to your destination chain and calls receiveMessage on that chain's MessageTransmitterV2
+      for you. CCTP V2 testnet contracts share the same address across chains (verified on
+      Ethereum Sepolia and Base Sepolia). MetaMask briefly switches networks during the mint
+      step, then switches back.
+    -->
   </div>
 
   <!-- SEND -->
@@ -164,7 +165,7 @@
     <div class="field">
       <div class="flabel">From</div>
       <div class="row">
-        <input type="number" id="sendAmt" placeholder="0.00" />
+        <input type="number" id="sendAmt" placeholder="0.00" min="0" step="any" />
         <select id="sendToken"><option value="USDC">USDC</option><option value="EURC">EURC</option></select>
       </div>
       <div class="balrow"><span id="sendBal">Balance: 0.00</span>
@@ -181,11 +182,10 @@
     <div id="historyList"><div class="status">No transactions yet this session.</div></div>
   </div>
 
-  <div class="hint">
-    Network: Arc Testnet · RPC <code>https://rpc.testnet.arc.network</code> · Chain ID <code>5042002</code> ·
-    Explorer <a href="https://testnet.arcscan.app" target="_blank">testnet.arcscan.app</a> ·
-    Faucet <a href="https://faucet.circle.com/#developer-console-faucet" target="_blank">faucet.circle.com</a>
-  </div>
+  <!--
+    Network: Arc Testnet · RPC https://rpc.testnet.arc.network · Chain ID 5042002 ·
+    Explorer https://testnet.arcscan.app · Faucet https://faucet.circle.com/#developer-console-faucet
+  -->
 </main>
 
 <footer>
