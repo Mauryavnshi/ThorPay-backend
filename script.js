@@ -409,8 +409,22 @@ async function refreshBalances() {
     }
   }
 
+  // Swap panel's "Balance: ..." line — depends on whichever token is
+  // currently selected in the From dropdown (USDC / EURC / cirBTC), so it
+  // has to be refreshed here once every balance has been fetched, same as
+  // it's refreshed below whenever that dropdown changes.
+  updateSwapFromBal();
+
   document.dispatchEvent(new CustomEvent("thorpay:balances"));
 }
+
+function updateSwapFromBal() {
+  const sel = document.getElementById("swapFromToken");
+  const sym = sel ? sel.value : "USDC";
+  setText("swapFromBal", "Balance: " + formatBal(latestBalances[sym]));
+}
+const swapFromTokenSel = document.getElementById("swapFromToken");
+if (swapFromTokenSel) swapFromTokenSel.addEventListener("change", updateSwapFromBal);
 
 async function refreshDestinationBalance() {
   const chainSel = document.getElementById("bridgeToChain");
