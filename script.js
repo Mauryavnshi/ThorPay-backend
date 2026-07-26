@@ -181,10 +181,9 @@ function disconnectWallet() {
   const banner = document.getElementById("networkBanner");
   if (banner) banner.style.display = "none";
 
-  ["swapBtn", "bridgeBtn", "sendBtn"].forEach(id => {
-    const btn = document.getElementById(id);
-    if (btn) btn.disabled = true;
-  });
+  // Left clickable on purpose — each button's own click handler now
+  // triggers wallet connect first when nothing's connected yet, instead of
+  // sitting disabled and eating the click silently.
   setBtnLabel("swapBtn", "Connect wallet to swap");
   setBtnLabel("bridgeBtn", "Connect wallet to bridge");
   setBtnLabel("sendBtn", "Connect wallet to send");
@@ -532,7 +531,16 @@ if (bridgeBtn) {
   bridgeBtn.addEventListener("click", async () => {
     const statusEl = document.getElementById("bridgeStatus");
     const progressEl = document.getElementById("bridgeProgress");
-    if (!signer) { statusEl.className = "status err"; statusEl.innerText = "Connect your wallet first."; return; }
+    if (!signer) {
+      try {
+        statusEl.className = "status"; statusEl.innerText = "Connecting wallet\u2026";
+        await connectWallet();
+      } catch (err) {
+        statusEl.className = "status err"; statusEl.innerText = "Wallet connection failed: " + (err.message || err);
+        return;
+      }
+      if (!signer) { statusEl.className = "status err"; statusEl.innerText = "Connect your wallet first."; return; }
+    }
 
     const amt = document.getElementById("bridgeFromAmt").value;
     if (!amt || Number(amt) <= 0) { statusEl.className = "status err"; statusEl.innerText = "Enter an amount."; return; }
@@ -725,7 +733,16 @@ if (sendTokenSel) sendTokenSel.addEventListener("change", () => {
 if (sendBtn) {
   sendBtn.addEventListener("click", async () => {
     const statusEl = document.getElementById("sendStatus");
-    if (!signer) { statusEl.className = "status err"; statusEl.innerText = "Connect your wallet first."; return; }
+    if (!signer) {
+      try {
+        statusEl.className = "status"; statusEl.innerText = "Connecting wallet\u2026";
+        await connectWallet();
+      } catch (err) {
+        statusEl.className = "status err"; statusEl.innerText = "Wallet connection failed: " + (err.message || err);
+        return;
+      }
+      if (!signer) { statusEl.className = "status err"; statusEl.innerText = "Connect your wallet first."; return; }
+    }
 
     const to = document.getElementById("sendTo").value.trim();
     const amt = document.getElementById("sendAmt").value;
@@ -865,6 +882,7 @@ if (window.ethereum) {
 window.ThorPay = {
   getUserAddress: () => userAddress,
   getSigner: () => signer,
+  connectWallet,
   getBalance: (symbol) => latestBalances[symbol] ?? null,
   formatBal,
   refreshBalances,
