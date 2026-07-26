@@ -132,7 +132,7 @@
       </div>
     </details>
 
-    <button class="btn btn-primary btn-block" id="swapBtn" disabled>Connect wallet to swap</button>
+    <button class="btn btn-primary btn-block" id="swapBtn">Connect wallet to swap</button>
     <div class="status" id="swapStatus"></div>
     <!--
       Swap needs a server-side signer per Circle's own App Kit rules, so
@@ -172,7 +172,7 @@
       <div class="rline"><span>Protocol</span><span>Circle CCTP V2</span></div>
       <div class="rline"><span>Steps</span><span>Approve → Burn (Arc) → Attestation → Mint (destination)</span></div>
     </div>
-    <button class="btn btn-primary btn-block" id="bridgeBtn" disabled>Connect wallet to bridge</button>
+    <button class="btn btn-primary btn-block" id="bridgeBtn">Connect wallet to bridge</button>
     <button class="btn btn-primary btn-block" id="bridgeMintBtn" style="display:none;margin-top:8px;">Complete mint on destination chain</button>
     <button class="btn btn-block" id="bridgeRetryBtn" style="display:none;margin-top:8px;">Check attestation again</button>
     <div class="status" id="bridgeStatus"></div>
@@ -204,7 +204,7 @@
         <div class="pct"><span data-pct="25">25%</span><span data-pct="50">50%</span><span data-pct="75">75%</span><span data-pct="100">100%</span></div>
       </div>
     </div>
-    <button class="btn btn-primary btn-block" id="sendBtn" disabled>Connect wallet to send</button>
+    <button class="btn btn-primary btn-block" id="sendBtn">Connect wallet to send</button>
     <div class="status" id="sendStatus"></div>
   </div>
 
@@ -508,9 +508,22 @@
   if (swapBtn) {
     swapBtn.addEventListener("click", async () => {
       const statusEl = document.getElementById("swapStatus");
-      const userAddress = window.ThorPay && window.ThorPay.getUserAddress();
-      const signer = window.ThorPay && window.ThorPay.getSigner();
-      if (!userAddress || !signer) { statusEl.className = "status err"; statusEl.innerText = "Connect your wallet first."; return; }
+      let userAddress = window.ThorPay && window.ThorPay.getUserAddress();
+      let signer = window.ThorPay && window.ThorPay.getSigner();
+
+      if (!userAddress || !signer) {
+        try {
+          statusEl.className = "status"; statusEl.innerText = "Connecting wallet\u2026";
+          await window.ThorPay.connectWallet();
+        } catch (err) {
+          statusEl.className = "status err";
+          statusEl.innerText = "Wallet connection failed: " + (err.message || err);
+          return;
+        }
+        userAddress = window.ThorPay.getUserAddress();
+        signer = window.ThorPay.getSigner();
+        if (!userAddress || !signer) { statusEl.className = "status err"; statusEl.innerText = "Connect your wallet first."; return; }
+      }
 
       const amt = document.getElementById("swapFromAmt").value;
       const tokenIn = document.getElementById("swapFromToken").value;
