@@ -115,19 +115,19 @@
     </div>
 
     <div class="route-box">
-      <div class="rline"><span>Route</span><span>Swap relayer · Circle App Kit</span></div>
+      <div class="rline"><span>Route</span><span>Circle App Kit · your wallet</span></div>
       <div class="rline"><span>Status</span><span id="swapRouteStatus">Enter an amount to see a quote</span></div>
       <div class="rline"><span>Min. received</span><span id="swapMinReceived">—</span></div>
       <div class="rline"><span>Swap fee</span><span id="swapProviderFee">—</span></div>
       <div class="rline"><span>Est. network fee</span><span id="swapGasFee">—</span></div>
     </div>
 
-    <details class="advanced-toggle" id="relayerAdvanced">
-      <summary>Advanced — relayer server URL</summary>
+    <details class="advanced-toggle" id="kitKeyAdvanced">
+      <summary>Advanced — Circle Kit Key</summary>
       <div class="field" style="margin-top:8px;">
-        <div class="flabel">Relayer URL (only needed if you're running your own)</div>
+        <div class="flabel">Kit Key (free from console.circle.com/api-keys)</div>
         <div class="row">
-          <input type="text" id="swapRelayerUrl" placeholder="https://your-relayer.onrender.com" style="font-size:13px;font-weight:500;" />
+          <input type="text" id="swapKitKey" placeholder="KIT_KEY:xxxxxxxx:xxxxxxxx" style="font-size:13px;font-weight:500;" />
         </div>
       </div>
     </details>
@@ -135,12 +135,11 @@
     <button class="btn btn-primary btn-block" id="swapBtn">Connect wallet to swap</button>
     <div class="status" id="swapStatus"></div>
     <!--
-      Swap needs a server-side signer per Circle's own App Kit rules, so
-      execution goes through ThorPay's own small relayer backend (see
-      /thorpay-backend in the repo) instead of calling Circle directly from
-      the browser, which fails with a CORS/network error. Deploy that
-      backend once (Render/Vercel), paste its URL into "Advanced" above,
-      and it's saved in this browser for next time.
+      Swap runs entirely in the browser via Circle's App Kit SDK
+      (createViemAdapterFromProvider) — signed directly by the connected
+      wallet, no relayer backend, no custodial hop. Ships with a default
+      testnet Kit Key baked in so any visitor can try it with zero setup;
+      "Advanced" only matters if someone wants to use their own.
     -->
   </div>
 
@@ -238,358 +237,371 @@
 <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
 <script src="script.js"></script>
 
-<!-- Swap — talks to ThorPay's own relayer backend (see /thorpay-backend),
-     which holds the server-side signer Circle's App Kit requires for Swap.
-     No AppKit code runs in the browser at all anymore — this is a plain
-     fetch() to your deployed backend. Depends on window.ThorPay exposed at
-     the bottom of script.js for wallet state + shared UI helpers. -->
-<script>
-(function () {
-  let selectedSlippage = 0.5; // percent
-  let cachedRelayerAddress = null;
-  let cachedRelayerUrl = null;
+<!-- Swap — runs directly through Circle's App Kit SDK in the browser, signed by
+     the connected wallet itself (createViemAdapterFromProvider). No relayer
+     backend, no custodial hop — the same pattern Circle's own browser-wallet
+     quickstarts use (and the same pattern Zion's demo uses: two wallet-signed
+     transactions, approve then swap). Ships with a default testnet Kit Key so
+     any visitor gets a working demo with zero setup; "Advanced" lets someone
+     swap in their own. Depends on window.ThorPay exposed at the bottom of
+     script.js for wallet-connection state + shared UI helpers.
 
-  // Fill this in once you deploy /thorpay-backend (Render, Railway, etc.)
-  // and every visitor to the site gets real Swap with nothing to paste —
-  // the "Advanced" field below only matters for someone running their own
-  // separate relayer instead of this default one.
-  const DEFAULT_RELAYER_URL = "https://thorpay-backend-1.onrender.com";
+     esm.sh serves @circle-fin/app-kit / @circle-fin/adapter-viem-v2 as browser
+     ES modules on the fly — versions aren't pinned here, so if this ever
+     breaks after an upstream release, pin exact versions once you check npm
+     for current numbers. -->
+<script type="module">
+import { AppKit } from "https://esm.sh/@circle-fin/app-kit";
+import { createViemAdapterFromProvider } from "https://esm.sh/@circle-fin/adapter-viem-v2";
+import { createPublicClient, http, fallback } from "https://esm.sh/viem";
 
-  const relayerUrlInput = document.getElementById("swapRelayerUrl");
-  const relayerAdvanced = document.getElementById("relayerAdvanced");
-  if (relayerUrlInput) {
-    const saved = localStorage.getItem("thorpay_relayer_url");
-    relayerUrlInput.value = saved || DEFAULT_RELAYER_URL;
-    // If a default is baked in and nobody has overridden it, hide the
-    // whole section — regular visitors never need to see or touch this.
-    if (DEFAULT_RELAYER_URL && !saved && relayerAdvanced) {
-      relayerAdvanced.style.display = "none";
-    }
-    relayerUrlInput.addEventListener("change", () => {
-      localStorage.setItem("thorpay_relayer_url", relayerUrlInput.value.trim());
-      cachedRelayerAddress = null; // force re-fetch of config for the new backend
-      scheduleEstimate();
-    });
-  }
+const kit = new AppKit();
 
-  function getRelayerUrl() {
-    const v = (relayerUrlInput && relayerUrlInput.value.trim()) || DEFAULT_RELAYER_URL;
-    return v.replace(/\/+$/, "");
-  }
+// Dropdown value -> the token alias App Kit expects. Everything else in this
+// file (balances, <select> values) keeps using "CIRBTC" internally; this is
+// the only place that needs to know App Kit spells it "cirBTC".
+const TOKEN_ALIAS = { USDC: "USDC", EURC: "EURC", CIRBTC: "cirBTC" };
 
-  async function getRelayerConfig() {
-    const url = getRelayerUrl();
-    if (!url) throw new Error("Swap isn't connected to a backend yet — open \u201cAdvanced\u201d and paste a relayer URL, or ask the site owner to finish deployment.");
-    if (cachedRelayerAddress && cachedRelayerUrl === url) return cachedRelayerAddress;
-    const res = await fetch(url + "/api/config");
-    if (!res.ok) throw new Error("Couldn't reach relayer config endpoint (HTTP " + res.status + ").");
-    const data = await res.json();
-    cachedRelayerAddress = data.relayerAddress;
-    cachedRelayerUrl = url;
-    return cachedRelayerAddress;
-  }
+// Testnet-only demo key, intentionally public so anyone opening this site
+// can try Swap with zero setup (see chat history for why this is an
+// acceptable tradeoff here — free/no-KYC key, no real funds involved).
+// "Advanced" below lets anyone override it with their own from
+// console.circle.com/api-keys, saved only in their own browser.
+const DEFAULT_KIT_KEY = "KIT_KEY:6271f2a103c367922a35ae1b45ff2e68:539fb81b214f53298eeb81b44a6829cf";
 
-  document.querySelectorAll("#slippageChips span").forEach(chip => {
-    chip.addEventListener("click", () => {
-      // Re-opening "Custom" after it's already applied should re-open the
-      // editor, not just re-apply the same value silently.
-      if (chip.dataset.slip === "custom" && chip.classList.contains("active")) {
-        const customField = document.getElementById("slippageCustomField");
-        if (customField) customField.style.display = "block";
-        const customInput = document.getElementById("slippageCustomInput");
-        if (customInput) customInput.focus();
-        return;
-      }
-      document.querySelectorAll("#slippageChips span").forEach(c => c.classList.remove("active"));
-      chip.classList.add("active");
-      const customField = document.getElementById("slippageCustomField");
-      if (chip.dataset.slip === "custom") {
-        if (customField) customField.style.display = "block";
-        const customInput = document.getElementById("slippageCustomInput");
-        const customStatus = document.getElementById("slippageCustomStatus");
-        if (customInput) {
-          customInput.value = "";
-          customInput.focus();
-        }
-        if (customStatus) { customStatus.innerText = ""; }
-      } else {
-        if (customField) customField.style.display = "none";
-        document.getElementById("slippageCustomChip").innerText = "Custom";
-        selectedSlippage = Number(chip.dataset.slip);
-        scheduleEstimate();
-      }
-    });
+// App Kit's own default RPC resolution for Arc Testnet was hitting the
+// shared public endpoint (rpc.testnet.arc.network) and throwing
+// "NETWORK_CONNECTION_FAILED" / -32011 "request limit reached" once several
+// people were using the demo at once. Per
+// https://docs.arc.io/arc/references/connect-to-arc, Arc has 3 more free
+// public RPC providers behind the same primary one, each run by a different
+// company (so each has its own independent rate limit) — fan out across all
+// four with viem's `fallback()` so one being busy doesn't fail the request.
+const ARC_TESTNET_RPCS = [
+  "https://rpc.testnet.arc.network",
+  "https://rpc.drpc.testnet.arc.network",
+  "https://rpc.blockdaemon.testnet.arc.network",
+  "https://rpc.quicknode.testnet.arc.network"
+];
+
+let selectedSlippage = 0.5; // percent
+let cachedAdapter = null;
+let cachedProvider = null;
+
+async function getAdapter() {
+  if (!window.ethereum) throw new Error("No browser wallet found (MetaMask, Rabby, etc).");
+  if (cachedAdapter && cachedProvider === window.ethereum) return cachedAdapter;
+  cachedAdapter = await createViemAdapterFromProvider({
+    provider: window.ethereum,
+    // Signing still goes through the wallet extension itself — this only
+    // changes where *reads* (balances, gas, simulation) are sent.
+    getPublicClient: ({ chain }) => createPublicClient({
+      chain,
+      transport: fallback(
+        ARC_TESTNET_RPCS.map(url => http(url, { retryCount: 2, timeout: 15000 })),
+        { rank: false } // try in listed order, don't reshuffle by perceived speed
+      )
+    })
   });
+  cachedProvider = window.ethereum;
+  return cachedAdapter;
+}
 
-  const slippageCustomInput = document.getElementById("slippageCustomInput");
-  const slippageCustomStatus = document.getElementById("slippageCustomStatus");
-  const slippageCustomOk = document.getElementById("slippageCustomOk");
+const kitKeyInput = document.getElementById("swapKitKey");
+const kitKeyAdvanced = document.getElementById("kitKeyAdvanced");
+if (kitKeyInput) {
+  const saved = localStorage.getItem("thorpay_kit_key");
+  kitKeyInput.value = saved || DEFAULT_KIT_KEY;
+  // Nothing to see here for a regular visitor — only show the box once
+  // someone has actually overridden the default with their own key.
+  if (DEFAULT_KIT_KEY && !saved && kitKeyAdvanced) kitKeyAdvanced.style.display = "none";
+  kitKeyInput.addEventListener("change", () => {
+    localStorage.setItem("thorpay_kit_key", kitKeyInput.value.trim());
+    scheduleEstimate();
+  });
+}
+function getKitKey() {
+  return (kitKeyInput && kitKeyInput.value.trim()) || DEFAULT_KIT_KEY;
+}
 
-  function applyCustomSlippage() {
-    const v = Number(slippageCustomInput.value);
-    if (!slippageCustomInput.value || !(v > 0 && v <= 50)) {
-      if (slippageCustomStatus) { slippageCustomStatus.innerText = "Enter a value between 0 and 50"; slippageCustomStatus.style.color = "var(--red)"; }
+document.querySelectorAll("#slippageChips span").forEach(chip => {
+  chip.addEventListener("click", () => {
+    // Re-opening "Custom" after it's already applied should re-open the
+    // editor, not just re-apply the same value silently.
+    if (chip.dataset.slip === "custom" && chip.classList.contains("active")) {
+      const customField = document.getElementById("slippageCustomField");
+      if (customField) customField.style.display = "block";
+      const customInput = document.getElementById("slippageCustomInput");
+      if (customInput) customInput.focus();
       return;
     }
-    selectedSlippage = v;
-    // Collapse back to the normal chip row — only the applied % shows now,
-    // on the "Custom" chip itself. Click "Custom" again later to edit it.
+    document.querySelectorAll("#slippageChips span").forEach(c => c.classList.remove("active"));
+    chip.classList.add("active");
     const customField = document.getElementById("slippageCustomField");
-    if (customField) customField.style.display = "none";
-    const customChip = document.getElementById("slippageCustomChip");
-    if (customChip) customChip.innerText = v + "%";
-    if (slippageCustomStatus) { slippageCustomStatus.innerText = ""; }
-    scheduleEstimate();
+    if (chip.dataset.slip === "custom") {
+      if (customField) customField.style.display = "block";
+      const customInput = document.getElementById("slippageCustomInput");
+      const customStatus = document.getElementById("slippageCustomStatus");
+      if (customInput) { customInput.value = ""; customInput.focus(); }
+      if (customStatus) customStatus.innerText = "";
+    } else {
+      if (customField) customField.style.display = "none";
+      document.getElementById("slippageCustomChip").innerText = "Custom";
+      selectedSlippage = Number(chip.dataset.slip);
+      scheduleEstimate();
+    }
+  });
+});
+
+const slippageCustomInput = document.getElementById("slippageCustomInput");
+const slippageCustomStatus = document.getElementById("slippageCustomStatus");
+const slippageCustomOk = document.getElementById("slippageCustomOk");
+
+function applyCustomSlippage() {
+  const v = Number(slippageCustomInput.value);
+  if (!slippageCustomInput.value || !(v > 0 && v <= 50)) {
+    if (slippageCustomStatus) { slippageCustomStatus.innerText = "Enter a value between 0 and 50"; slippageCustomStatus.style.color = "var(--red)"; }
+    return;
+  }
+  selectedSlippage = v;
+  const customField = document.getElementById("slippageCustomField");
+  if (customField) customField.style.display = "none";
+  const customChip = document.getElementById("slippageCustomChip");
+  if (customChip) customChip.innerText = v + "%";
+  if (slippageCustomStatus) slippageCustomStatus.innerText = "";
+  scheduleEstimate();
+}
+
+if (slippageCustomInput) {
+  slippageCustomInput.addEventListener("input", () => {
+    const v = Number(slippageCustomInput.value);
+    if (slippageCustomInput.value && v > 0 && v <= 50) {
+      if (slippageCustomStatus) { slippageCustomStatus.innerText = "Press OK to apply " + v + "% slippage"; slippageCustomStatus.style.color = ""; }
+    } else if (slippageCustomStatus) {
+      slippageCustomStatus.innerText = slippageCustomInput.value ? "Enter a value between 0 and 50" : "";
+      slippageCustomStatus.style.color = "var(--red)";
+    }
+  });
+  slippageCustomInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); applyCustomSlippage(); }
+  });
+}
+if (slippageCustomOk) slippageCustomOk.addEventListener("click", applyCustomSlippage);
+
+async function estimateGasFee() {
+  try {
+    if (!window.ThorPay || !window.ThorPay.getGasPrice) return "\u2014";
+    const gasPrice = await window.ThorPay.getGasPrice();
+    const cost = gasPrice.mul(130000);
+    const decimals = window.ThorPay.nativeDecimals || 18;
+    return "~" + Number(ethers.utils.formatUnits(cost, decimals)).toFixed(4) + " USDC";
+  } catch (e) {
+    console.warn("gas estimate failed", e);
+    return "\u2014";
+  }
+}
+
+// Cached USD prices via kit.getTokenRates() — no adapter needed (read-only),
+// so this can run straight from the browser too, no relayer required.
+let ratesCache = null;
+let ratesCacheAt = 0;
+async function getRates() {
+  if (ratesCache && Date.now() - ratesCacheAt < 30000) return ratesCache;
+  try {
+    const result = await kit.getTokenRates({
+      chain: "Arc_Testnet",
+      tokens: ["USDC", "EURC", "cirBTC"],
+      config: { kitKey: getKitKey() }
+    });
+    ratesCache = result;
+    ratesCacheAt = Date.now();
+    return ratesCache;
+  } catch (e) {
+    console.warn("rates fetch failed", e);
+    return null;
+  }
+}
+
+async function updateUsdHint(elId, tokenSymbol, amountStr) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const amt = Number(amountStr);
+  if (!amt || amt <= 0) { el.innerText = ""; return; }
+  const rates = await getRates();
+  const entry = rates && (rates[TOKEN_ALIAS[tokenSymbol]] || rates[tokenSymbol]);
+  const price = entry && (entry.priceUSD ?? entry.price ?? entry.usd);
+  if (!price) { el.innerText = ""; return; }
+  el.innerText = "\u2248 $" + (amt * Number(price)).toFixed(2);
+}
+
+let estimateTimer = null;
+function scheduleEstimate() {
+  clearTimeout(estimateTimer);
+  estimateTimer = setTimeout(runEstimate, 500);
+}
+
+async function runEstimate() {
+  const routeStatus = document.getElementById("swapRouteStatus");
+  const minReceivedEl = document.getElementById("swapMinReceived");
+  const gasFeeEl = document.getElementById("swapGasFee");
+  const feeEl = document.getElementById("swapProviderFee");
+  const toAmt = document.getElementById("swapToAmt");
+  const amt = document.getElementById("swapFromAmt").value;
+  const tokenIn = document.getElementById("swapFromToken").value;
+  const tokenOut = document.getElementById("swapToToken").value;
+
+  updateUsdHint("swapFromUsd", tokenIn, amt);
+
+  if (!window.ThorPay || !window.ThorPay.getUserAddress()) {
+    if (routeStatus) routeStatus.innerText = "Connect your wallet to see a live quote";
+    return;
+  }
+  if (tokenIn === tokenOut) {
+    toAmt.value = "";
+    document.getElementById("swapToUsd").innerText = "";
+    if (routeStatus) routeStatus.innerText = "Pick two different tokens";
+    if (minReceivedEl) minReceivedEl.innerText = "\u2014";
+    if (feeEl) feeEl.innerText = "\u2014";
+    return;
+  }
+  if (!amt || Number(amt) <= 0) {
+    toAmt.value = "";
+    document.getElementById("swapToUsd").innerText = "";
+    if (routeStatus) routeStatus.innerText = "Enter an amount to see a quote";
+    if (minReceivedEl) minReceivedEl.innerText = "\u2014";
+    if (feeEl) feeEl.innerText = "\u2014";
+    return;
   }
 
-  if (slippageCustomInput) {
-    slippageCustomInput.addEventListener("input", () => {
-      const v = Number(slippageCustomInput.value);
-      if (slippageCustomInput.value && v > 0 && v <= 50) {
-        if (slippageCustomStatus) { slippageCustomStatus.innerText = "Press OK to apply " + v + "% slippage"; slippageCustomStatus.style.color = ""; }
-      } else if (slippageCustomStatus) {
-        slippageCustomStatus.innerText = slippageCustomInput.value ? "Enter a value between 0 and 50" : "";
-        slippageCustomStatus.style.color = "var(--red)";
+  if (gasFeeEl) estimateGasFee().then(fee => { gasFeeEl.innerText = fee; });
+
+  try {
+    if (routeStatus) routeStatus.innerText = "Fetching quote\u2026";
+    const adapter = await getAdapter();
+    const estimate = await kit.estimateSwap({
+      from: { adapter, chain: "Arc_Testnet" },
+      tokenIn: TOKEN_ALIAS[tokenIn],
+      tokenOut: TOKEN_ALIAS[tokenOut],
+      amountIn: amt,
+      config: {
+        slippageBps: Math.round(selectedSlippage * 100),
+        kitKey: getKitKey()
       }
     });
-    slippageCustomInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { e.preventDefault(); applyCustomSlippage(); }
-    });
-  }
-  if (slippageCustomOk) slippageCustomOk.addEventListener("click", applyCustomSlippage);
 
-  // Arc's gas token IS USDC, so a rough gas estimate can be shown in USDC
-  // directly. Two on-chain legs happen for a swap here (deposit transfer +
-  // relayer payout), so this covers both at a conservative gas estimate.
-  async function estimateGasFee() {
-    try {
-      if (!window.ThorPay || !window.ThorPay.getGasPrice) return "\u2014";
-      const gasPrice = await window.ThorPay.getGasPrice();
-      const cost = gasPrice.mul(130000); // ERC20 transfer, roughly
-      const decimals = window.ThorPay.nativeDecimals || 18;
-      return "~" + Number(ethers.utils.formatUnits(cost, decimals)).toFixed(4) + " USDC";
-    } catch (e) {
-      console.warn("gas estimate failed", e);
-      return "\u2014";
+    const outAmount = Number(estimate.estimatedOutput.amount);
+    toAmt.value = outAmount.toFixed(6);
+    updateUsdHint("swapToUsd", tokenOut, outAmount);
+    if (routeStatus) routeStatus.innerText = "\u2248 " + outAmount.toFixed(6) + " " + tokenOut;
+
+    if (feeEl) {
+      const fees = estimate.fees || [];
+      feeEl.innerText = fees.length > 0
+        ? fees.map(f => f.amount + " " + f.token + (f.type ? " (" + f.type + ")" : "")).join(", ")
+        : "~0.02% (provider fee)";
     }
-  }
-
-  // Cached USD prices via /api/rates (kit.getTokenRates()) — much cheaper
-  // than a full swap quote, so this can run on every keystroke without
-  // worrying about hammering the relayer.
-  let ratesCache = null;
-  let ratesCacheAt = 0;
-  async function getRates() {
-    const url = getRelayerUrl();
-    if (!url) return null;
-    if (ratesCache && Date.now() - ratesCacheAt < 30000) return ratesCache;
-    try {
-      const res = await fetch(url + "/api/rates");
-      if (!res.ok) return null;
-      const data = await res.json();
-      ratesCache = data.rates?.Arc_Testnet || null;
-      ratesCacheAt = Date.now();
-      return ratesCache;
-    } catch (e) {
-      console.warn("rates fetch failed", e);
-      return null;
+    if (minReceivedEl) {
+      const minReceived = outAmount * (1 - selectedSlippage / 100);
+      minReceivedEl.innerText = minReceived.toFixed(6) + " " + tokenOut + " (" + selectedSlippage + "% slippage)";
     }
+  } catch (err) {
+    console.error("quote failed", err);
+    toAmt.value = "";
+    if (minReceivedEl) minReceivedEl.innerText = "\u2014";
+    if (feeEl) feeEl.innerText = "\u2014";
+    if (routeStatus) routeStatus.innerText = "Couldn't fetch a quote: " + (err.message || err);
   }
+}
 
-  const TOKEN_ADDR_LOWER = {
-    USDC: "0x3600000000000000000000000000000000000000",
-    EURC: "0x89b50855aa3be2f677cd6303cec089b5f319d72a",
-    CIRBTC: "0xf0c4a4ce82a5746abaad9425360ab04fbba432bf"
-  };
+const fromAmtEl = document.getElementById("swapFromAmt");
+if (fromAmtEl) fromAmtEl.addEventListener("input", scheduleEstimate);
+["swapFromToken", "swapToToken"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("change", scheduleEstimate);
+});
 
-  async function updateUsdHint(elId, tokenSymbol, amountStr) {
-    const el = document.getElementById(elId);
-    if (!el) return;
-    const amt = Number(amountStr);
-    if (!amt || amt <= 0) { el.innerText = ""; return; }
-    const rates = await getRates();
-    if (!rates) { el.innerText = ""; return; }
-    const entry = rates[TOKEN_ADDR_LOWER[tokenSymbol]];
-    if (!entry) { el.innerText = ""; return; }
-    el.innerText = "\u2248 $" + (amt * Number(entry.priceUSD)).toFixed(2);
-  }
+function updateSwapBalances() {
+  if (!window.ThorPay) return;
+  const fromSym = document.getElementById("swapFromToken").value;
+  const toSym = document.getElementById("swapToToken").value;
+  const fromBalEl = document.getElementById("swapFromBal");
+  const toBalEl = document.getElementById("swapToBal");
+  if (fromBalEl) fromBalEl.innerText = "Balance: " + window.ThorPay.formatBal(window.ThorPay.getBalance(fromSym));
+  if (toBalEl) toBalEl.innerText = "Balance: " + window.ThorPay.formatBal(window.ThorPay.getBalance(toSym));
+}
+updateSwapBalances();
+["swapFromToken", "swapToToken"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("change", updateSwapBalances);
+});
+document.addEventListener("thorpay:balances", updateSwapBalances);
 
-  let estimateTimer = null;
-  function scheduleEstimate() {
-    clearTimeout(estimateTimer);
-    estimateTimer = setTimeout(runEstimate, 500);
-  }
+const swapBtn = document.getElementById("swapBtn");
+if (swapBtn) {
+  swapBtn.addEventListener("click", async () => {
+    const statusEl = document.getElementById("swapStatus");
+    let userAddress = window.ThorPay && window.ThorPay.getUserAddress();
+    let signer = window.ThorPay && window.ThorPay.getSigner();
 
-  async function runEstimate() {
-    const routeStatus = document.getElementById("swapRouteStatus");
-    const minReceivedEl = document.getElementById("swapMinReceived");
-    const gasFeeEl = document.getElementById("swapGasFee");
-    const feeEl = document.getElementById("swapProviderFee");
-    const toAmt = document.getElementById("swapToAmt");
+    if (!userAddress || !signer) {
+      try {
+        statusEl.className = "status"; statusEl.innerText = "Connecting wallet\u2026";
+        await window.ThorPay.connectWallet();
+      } catch (err) {
+        statusEl.className = "status err";
+        statusEl.innerText = "Wallet connection failed: " + (err.message || err);
+        return;
+      }
+      userAddress = window.ThorPay.getUserAddress();
+      signer = window.ThorPay.getSigner();
+      if (!userAddress || !signer) { statusEl.className = "status err"; statusEl.innerText = "Connect your wallet first."; return; }
+    }
+
     const amt = document.getElementById("swapFromAmt").value;
     const tokenIn = document.getElementById("swapFromToken").value;
     const tokenOut = document.getElementById("swapToToken").value;
+    if (!amt || Number(amt) <= 0) { statusEl.className = "status err"; statusEl.innerText = "Enter an amount."; return; }
+    if (tokenIn === tokenOut) { statusEl.className = "status err"; statusEl.innerText = "Choose two different tokens."; return; }
 
-    updateUsdHint("swapFromUsd", tokenIn, amt);
-
-    if (!window.ThorPay || !window.ThorPay.getUserAddress()) {
-      if (routeStatus) routeStatus.innerText = "Connect your wallet to see a live quote";
-      return;
-    }
-    if (!getRelayerUrl()) {
-      if (routeStatus) routeStatus.innerText = "Paste your relayer backend URL under \u201cAdvanced\u201d to get quotes";
-      return;
-    }
-    if (tokenIn === tokenOut) {
-      toAmt.value = "";
-      document.getElementById("swapToUsd").innerText = "";
-      if (routeStatus) routeStatus.innerText = "Pick two different tokens";
-      if (minReceivedEl) minReceivedEl.innerText = "\u2014";
-      if (feeEl) feeEl.innerText = "\u2014";
-      return;
-    }
-    if (!amt || Number(amt) <= 0) {
-      toAmt.value = "";
-      document.getElementById("swapToUsd").innerText = "";
-      if (routeStatus) routeStatus.innerText = "Enter an amount to see a quote";
-      if (minReceivedEl) minReceivedEl.innerText = "\u2014";
-      if (feeEl) feeEl.innerText = "\u2014";
+    const available = window.ThorPay.getBalance(tokenIn);
+    if (available !== null && Number(amt) > available) {
+      statusEl.className = "status err";
+      statusEl.innerText = "Insufficient balance. You have " + window.ThorPay.formatBal(available) + " " + tokenIn + " available.";
       return;
     }
 
-    if (gasFeeEl) estimateGasFee().then(fee => { gasFeeEl.innerText = fee; });
-
+    swapBtn.disabled = true;
     try {
-      if (routeStatus) routeStatus.innerText = "Fetching quote\u2026";
-      const url = getRelayerUrl();
-      const res = await fetch(url + "/api/quote", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tokenIn, tokenOut, amountIn: amt })
+      statusEl.className = "status"; statusEl.innerText = "Confirm the swap in your wallet\u2026 (you may see two prompts \u2014 approve, then swap)";
+      const adapter = await getAdapter();
+      const result = await kit.swap({
+        from: { adapter, chain: "Arc_Testnet" },
+        tokenIn: TOKEN_ALIAS[tokenIn],
+        tokenOut: TOKEN_ALIAS[tokenOut],
+        amountIn: amt,
+        config: {
+          slippageBps: Math.round(selectedSlippage * 100),
+          kitKey: getKitKey()
+        }
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
 
-      const outAmount = Number(data.estimatedOutput?.amount ?? data.amountOut);
-      toAmt.value = outAmount.toFixed(4);
-      updateUsdHint("swapToUsd", tokenOut, outAmount);
-      if (routeStatus) routeStatus.innerText = "\u2248 " + outAmount.toFixed(4) + " " + tokenOut;
-
-      const feeEl = document.getElementById("swapProviderFee");
-      if (feeEl) {
-        const fees = data.fees || [];
-        if (fees.length > 0) {
-          feeEl.innerText = fees.map(f => f.amount + " " + f.token + (f.type ? " (" + f.type + ")" : "")).join(", ");
-        } else {
-          feeEl.innerText = "~0.02% (provider fee)";
-        }
-      }
-      if (minReceivedEl) {
-        const minReceived = outAmount * (1 - selectedSlippage / 100);
-        minReceivedEl.innerText = minReceived.toFixed(4) + " " + tokenOut + " (" + selectedSlippage + "% slippage)";
-      }
+      statusEl.className = "status ok";
+      statusEl.innerText = "Swapped! Received " + result.amountOut + " " + tokenOut + ". Tx: " + result.txHash;
+      window.ThorPay.addHistory("SWAP", amt + " " + tokenIn + " \u2192 " + result.amountOut + " " + tokenOut, result.txHash);
+      await window.ThorPay.refreshBalances();
+      document.getElementById("swapFromAmt").value = "";
+      document.getElementById("swapToAmt").value = "";
+      document.getElementById("swapToUsd").innerText = "";
     } catch (err) {
-      console.error("quote failed", err);
-      toAmt.value = "";
-      if (minReceivedEl) minReceivedEl.innerText = "\u2014";
-      if (feeEl) feeEl.innerText = "\u2014";
-      if (routeStatus) routeStatus.innerText = "Couldn't fetch a quote: " + (err.message || err);
+      console.error("swap failed", err);
+      statusEl.className = "status err";
+      const msg = err.message || String(err);
+      statusEl.innerText = /^(swap|quote) failed/i.test(msg) ? msg : ("Swap failed: " + msg);
+    } finally {
+      swapBtn.disabled = false;
     }
-  }
-
-  const fromAmtEl = document.getElementById("swapFromAmt");
-  if (fromAmtEl) fromAmtEl.addEventListener("input", scheduleEstimate);
-  ["swapFromToken", "swapToToken"].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.addEventListener("change", scheduleEstimate);
   });
-
-  const swapBtn = document.getElementById("swapBtn");
-  if (swapBtn) {
-    swapBtn.addEventListener("click", async () => {
-      const statusEl = document.getElementById("swapStatus");
-      let userAddress = window.ThorPay && window.ThorPay.getUserAddress();
-      let signer = window.ThorPay && window.ThorPay.getSigner();
-
-      if (!userAddress || !signer) {
-        try {
-          statusEl.className = "status"; statusEl.innerText = "Connecting wallet\u2026";
-          await window.ThorPay.connectWallet();
-        } catch (err) {
-          statusEl.className = "status err";
-          statusEl.innerText = "Wallet connection failed: " + (err.message || err);
-          return;
-        }
-        userAddress = window.ThorPay.getUserAddress();
-        signer = window.ThorPay.getSigner();
-        if (!userAddress || !signer) { statusEl.className = "status err"; statusEl.innerText = "Connect your wallet first."; return; }
-      }
-
-      const amt = document.getElementById("swapFromAmt").value;
-      const tokenIn = document.getElementById("swapFromToken").value;
-      const tokenOut = document.getElementById("swapToToken").value;
-      if (!amt || Number(amt) <= 0) { statusEl.className = "status err"; statusEl.innerText = "Enter an amount."; return; }
-      if (tokenIn === tokenOut) { statusEl.className = "status err"; statusEl.innerText = "Choose two different tokens."; return; }
-
-      const available = window.ThorPay.getBalance(tokenIn);
-      if (available !== null && Number(amt) > available) {
-        statusEl.className = "status err";
-        statusEl.innerText = "Insufficient balance. You have " + window.ThorPay.formatBal(available) + " " + tokenIn + " available.";
-        return;
-      }
-
-      const TOKEN_ADDRESSES = {
-        USDC: "0x3600000000000000000000000000000000000000",
-        EURC: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
-        CIRBTC: "0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF"
-      };
-      const ERC20_ABI = [
-        "function transfer(address to, uint256 amount) returns (bool)",
-        "function decimals() view returns (uint8)"
-      ];
-
-      swapBtn.disabled = true;
-      try {
-        statusEl.className = "status"; statusEl.innerText = "Looking up relayer address\u2026";
-        const relayerAddress = await getRelayerConfig();
-
-        statusEl.innerText = "Step 1/2 \u2014 confirm the deposit to the relayer in MetaMask\u2026";
-        const tokenContract = new ethers.Contract(TOKEN_ADDRESSES[tokenIn], ERC20_ABI, signer);
-        const decimals = await tokenContract.decimals();
-        const depositTx = await tokenContract.transfer(relayerAddress, ethers.utils.parseUnits(amt, decimals));
-        statusEl.innerText = "Deposit sent, waiting for confirmation\u2026";
-        await depositTx.wait();
-
-        statusEl.innerText = "Step 2/2 \u2014 relayer is running the swap\u2026";
-        const url = getRelayerUrl();
-        const res = await fetch(url + "/api/swap", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            depositTxHash: depositTx.hash,
-            tokenIn, tokenOut, amountIn: amt,
-            recipient: userAddress
-          })
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
-
-        statusEl.className = "status ok";
-        statusEl.innerText = "Swapped! Received " + data.amountOut + " " + tokenOut + ". Payout tx: " + data.payoutTxHash;
-        window.ThorPay.addHistory("SWAP", amt + " " + tokenIn + " \u2192 " + data.amountOut + " " + tokenOut, data.payoutTxHash);
-        await window.ThorPay.refreshBalances();
-        document.getElementById("swapFromAmt").value = "";
-        document.getElementById("swapToAmt").value = "";
-      } catch (err) {
-        console.error("swap failed", err);
-        statusEl.className = "status err";
-        statusEl.innerText = "Swap failed: " + (err.message || err);
-      } finally {
-        swapBtn.disabled = false;
-      }
-    });
-  }
-})();
+}
 </script>
 </body>
 </html>
