@@ -38,7 +38,18 @@ const app = express();
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
-const ARC_RPC_URL = process.env.ARC_RPC_URL || "https://rpc.testnet.arc.network";
+// Arc has 4 free public RPC providers (https://docs.arc.io/arc/references/connect-to-arc),
+// each run by a different company with its own independent rate limit. If
+// ARC_RPC_URL is set (e.g. a paid Alchemy/dRPC endpoint), it goes first;
+// otherwise fall back across all four public ones in order.
+const ARC_RPC_FALLBACK_LIST = [
+  process.env.ARC_RPC_URL,
+  "https://rpc.testnet.arc.network",
+  "https://rpc.drpc.testnet.arc.network",
+  "https://rpc.blockdaemon.testnet.arc.network",
+  "https://rpc.quicknode.testnet.arc.network"
+].filter(Boolean);
+const ARC_RPC_URL = ARC_RPC_FALLBACK_LIST[0];
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .split(",").map(s => s.trim()).filter(Boolean);
 const MAX_SWAP_AMOUNT = Number(process.env.MAX_SWAP_AMOUNT || 50); // in tokenIn units, sane testnet default
@@ -88,7 +99,7 @@ console.log("  " + relayerWallet.address);
 const kit = new AppKit();
 let relayerAdapter = null;
 
-const { createPublicClient, http } = require("viem");
+const { createPublicClient, http, fallback } = require("viem");
 let ArcTestnetChain = null;
 try {
   ({ ArcTestnet: ArcTestnetChain } = require("@circle-fin/app-kit/chains"));
@@ -110,31 +121,31 @@ async function getRelayerAdapter() {
   // App Kit's own default RPC connection for Arc Testnet was throwing
   // "Network connection failed for Arc Testnet" on every swap/quote call.
   // Per https://docs.arc.io/app-kit/tutorials/adapter-setups, overriding
-  // getPublicClient with our own RPC (same ARC_RPC_URL used elsewhere in
-  // this file) fixes that.
+  // getPublicClient with our own RPC fixes that.
   //
-  // On top of that, Arc's shared public RPC (the default ARC_RPC_URL) rate
-  // limits fast (JSON-RPC code -32011 "request limit reached") the moment
-  // more than a couple requests land close together — every quote AND every
-  // swap execution hits it. retryDelay below backs off exponentially instead
-  // of hammering it again immediately. This buys headroom, but the real fix
-  // for a relayer with real traffic is a dedicated RPC (free tier is enough):
-  // Alchemy (https://www.alchemy.com/rpc/arc-testnet) or dRPC
-  // (https://drpc.org/chainlist/arc-testnet-rpc) — then set ARC_RPC_URL to
-  // that endpoint in Render's environment variables instead of the shared one.
+  // On top of that, Arc's shared public RPC rate limits fast (JSON-RPC code
+  // -32011 "request limit reached") once more than a couple requests land
+  // close together. Two layers of defense: fan out across all configured
+  // RPCs with viem's fallback() (ARC_RPC_FALLBACK_LIST — includes Arc's 3
+  // other free public providers per https://docs.arc.io/arc/references/connect-to-arc,
+  // each with its own independent rate limit), and back off exponentially on
+  // top of that instead of hammering the same one again immediately.
   relayerAdapter = factory({
     privateKey: process.env.RELAYER_PRIVATE_KEY,
     getPublicClient: ({ chain }) => createPublicClient({
       chain: ArcTestnetChain || chain,
-      transport: http(ARC_RPC_URL, {
-        retryCount: 5,
-        timeout: 20000,
-        retryDelay: ({ count, error }) => {
-          const isRateLimited = error && (error.code === -32011 || /request limit/i.test(String(error.message || "")));
-          const base = isRateLimited ? 1500 : 300;
-          return Math.min(base * 2 ** count, 15000) + Math.floor(Math.random() * 300); // exponential backoff + jitter
-        }
-      })
+      transport: fallback(
+        ARC_RPC_FALLBACK_LIST.map(url => http(url, {
+          retryCount: 3,
+          timeout: 20000,
+          retryDelay: ({ count, error }) => {
+            const isRateLimited = error && (error.code === -32011 || /request limit/i.test(String(error.message || "")));
+            const base = isRateLimited ? 2000 : 300;
+            return Math.min(base * 2 ** count, 20000) + Math.floor(Math.random() * 300); // exponential backoff + jitter
+          }
+        })),
+        { rank: false }
+      )
     })
   });
   return relayerAdapter;
@@ -148,7 +159,7 @@ async function getRelayerAdapter() {
    through viem's retry path). Retries the whole call a few times with
    backoff before giving up.
    ------------------------------------------------------------------------- */
-async function withRpcRetry(fn, { retries = 4, baseDelayMs = 1500 } = {}) {
+async function withRpcRetry(fn, { retries = 7, baseDelayMs = 2000 } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -299,7 +310,7 @@ app.post("/api/swap", rateLimit, async (req, res) => {
     }
 
     // --- Verify the deposit actually happened on-chain ---
-    const receipt = await provider.getTransactionReceipt(depositTxHash);
+    const receipt = await withRpcRetry(() => provider.getTransactionReceipt(depositTxHash));
     if (!receipt || receipt.status !== 1) {
       return res.status(400).json({ error: "Deposit transaction not found or not confirmed yet." });
     }
