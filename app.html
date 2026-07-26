@@ -109,7 +109,9 @@
       <div class="flabel">Custom slippage %</div>
       <div class="row">
         <input type="number" id="slippageCustomInput" placeholder="e.g. 2.5" min="0" max="50" step="0.1" />
+        <button type="button" id="slippageCustomOk" class="btn btn-outline" style="white-space:nowrap;">OK</button>
       </div>
+      <div class="usd-hint" id="slippageCustomStatus" style="margin-top:4px;"></div>
     </div>
 
     <div class="route-box">
@@ -289,18 +291,30 @@
 
   document.querySelectorAll("#slippageChips span").forEach(chip => {
     chip.addEventListener("click", () => {
+      // Re-opening "Custom" after it's already applied should re-open the
+      // editor, not just re-apply the same value silently.
+      if (chip.dataset.slip === "custom" && chip.classList.contains("active")) {
+        const customField = document.getElementById("slippageCustomField");
+        if (customField) customField.style.display = "block";
+        const customInput = document.getElementById("slippageCustomInput");
+        if (customInput) customInput.focus();
+        return;
+      }
       document.querySelectorAll("#slippageChips span").forEach(c => c.classList.remove("active"));
       chip.classList.add("active");
       const customField = document.getElementById("slippageCustomField");
       if (chip.dataset.slip === "custom") {
         if (customField) customField.style.display = "block";
         const customInput = document.getElementById("slippageCustomInput");
+        const customStatus = document.getElementById("slippageCustomStatus");
         if (customInput) {
-          selectedSlippage = Number(customInput.value) || selectedSlippage;
+          customInput.value = "";
           customInput.focus();
         }
+        if (customStatus) { customStatus.innerText = ""; }
       } else {
         if (customField) customField.style.display = "none";
+        document.getElementById("slippageCustomChip").innerText = "Custom";
         selectedSlippage = Number(chip.dataset.slip);
         scheduleEstimate();
       }
@@ -308,15 +322,41 @@
   });
 
   const slippageCustomInput = document.getElementById("slippageCustomInput");
+  const slippageCustomStatus = document.getElementById("slippageCustomStatus");
+  const slippageCustomOk = document.getElementById("slippageCustomOk");
+
+  function applyCustomSlippage() {
+    const v = Number(slippageCustomInput.value);
+    if (!slippageCustomInput.value || !(v > 0 && v <= 50)) {
+      if (slippageCustomStatus) { slippageCustomStatus.innerText = "Enter a value between 0 and 50"; slippageCustomStatus.style.color = "var(--red)"; }
+      return;
+    }
+    selectedSlippage = v;
+    // Collapse back to the normal chip row — only the applied % shows now,
+    // on the "Custom" chip itself. Click "Custom" again later to edit it.
+    const customField = document.getElementById("slippageCustomField");
+    if (customField) customField.style.display = "none";
+    const customChip = document.getElementById("slippageCustomChip");
+    if (customChip) customChip.innerText = v + "%";
+    if (slippageCustomStatus) { slippageCustomStatus.innerText = ""; }
+    scheduleEstimate();
+  }
+
   if (slippageCustomInput) {
     slippageCustomInput.addEventListener("input", () => {
       const v = Number(slippageCustomInput.value);
-      if (v > 0 && v <= 50) {
-        selectedSlippage = v;
-        scheduleEstimate();
+      if (slippageCustomInput.value && v > 0 && v <= 50) {
+        if (slippageCustomStatus) { slippageCustomStatus.innerText = "Press OK to apply " + v + "% slippage"; slippageCustomStatus.style.color = ""; }
+      } else if (slippageCustomStatus) {
+        slippageCustomStatus.innerText = slippageCustomInput.value ? "Enter a value between 0 and 50" : "";
+        slippageCustomStatus.style.color = "var(--red)";
       }
     });
+    slippageCustomInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); applyCustomSlippage(); }
+    });
   }
+  if (slippageCustomOk) slippageCustomOk.addEventListener("click", applyCustomSlippage);
 
   // Arc's gas token IS USDC, so a rough gas estimate can be shown in USDC
   // directly. Two on-chain legs happen for a swap here (deposit transfer +
@@ -439,7 +479,7 @@
       if (feeEl) {
         const fees = data.fees || [];
         if (fees.length > 0) {
-          feeEl.innerText = fees.map(f => Number(f.amount).toFixed(6) + " " + f.token + (f.type ? " (" + f.type + ")" : "")).join(", ");
+          feeEl.innerText = fees.map(f => f.amount + " " + f.token + (f.type ? " (" + f.type + ")" : "")).join(", ");
         } else {
           feeEl.innerText = "~0.02% (provider fee)";
         }
