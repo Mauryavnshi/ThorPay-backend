@@ -219,20 +219,22 @@ async function ensureArcNetwork() {
       params: [{ chainId: CONFIG.chainIdHex }]
     });
   } catch (switchErr) {
-    if (switchErr.code === 4902) {
-      await window.ethereum.request({
-        method: "wallet_addEthereumChain",
-        params: [{
-          chainId: CONFIG.chainIdHex,
-          chainName: CONFIG.chainName,
-          rpcUrls: CONFIG.rpcUrls,
-          nativeCurrency: CONFIG.nativeCurrency,
-          blockExplorerUrls: CONFIG.blockExplorerUrls
-        }]
-      });
-    } else {
-      throw switchErr;
-    }
+    // Different wallets signal "chain not added yet" differently — MetaMask
+    // uses error code 4902, but Rabby and others don't always match that
+    // exactly. Rather than guess at every wallet's error shape, just always
+    // try wallet_addEthereumChain on any switch failure: if the chain is
+    // already present, wallets handle that gracefully (switch or no-op)
+    // instead of erroring.
+    await window.ethereum.request({
+      method: "wallet_addEthereumChain",
+      params: [{
+        chainId: CONFIG.chainIdHex,
+        chainName: CONFIG.chainName,
+        rpcUrls: CONFIG.rpcUrls,
+        nativeCurrency: CONFIG.nativeCurrency,
+        blockExplorerUrls: CONFIG.blockExplorerUrls
+      }]
+    });
   }
 }
 
@@ -240,20 +242,16 @@ async function switchOrAddChain(dest) {
   try {
     await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: dest.chainIdHex }] });
   } catch (switchErr) {
-    if (switchErr.code === 4902) {
-      await window.ethereum.request({
-        method: "wallet_addEthereumChain",
-        params: [{
-          chainId: dest.chainIdHex,
-          chainName: dest.name,
-          rpcUrls: dest.rpcUrls,
-          nativeCurrency: dest.nativeCurrency,
-          blockExplorerUrls: dest.blockExplorerUrls
-        }]
-      });
-    } else {
-      throw switchErr;
-    }
+    await window.ethereum.request({
+      method: "wallet_addEthereumChain",
+      params: [{
+        chainId: dest.chainIdHex,
+        chainName: dest.name,
+        rpcUrls: dest.rpcUrls,
+        nativeCurrency: dest.nativeCurrency,
+        blockExplorerUrls: dest.blockExplorerUrls
+      }]
+    });
   }
 }
 
