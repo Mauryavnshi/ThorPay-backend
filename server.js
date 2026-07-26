@@ -112,14 +112,61 @@ async function getRelayerAdapter() {
   // Per https://docs.arc.io/app-kit/tutorials/adapter-setups, overriding
   // getPublicClient with our own RPC (same ARC_RPC_URL used elsewhere in
   // this file) fixes that.
+  //
+  // On top of that, Arc's shared public RPC (the default ARC_RPC_URL) rate
+  // limits fast (JSON-RPC code -32011 "request limit reached") the moment
+  // more than a couple requests land close together — every quote AND every
+  // swap execution hits it. retryDelay below backs off exponentially instead
+  // of hammering it again immediately. This buys headroom, but the real fix
+  // for a relayer with real traffic is a dedicated RPC (free tier is enough):
+  // Alchemy (https://www.alchemy.com/rpc/arc-testnet) or dRPC
+  // (https://drpc.org/chainlist/arc-testnet-rpc) — then set ARC_RPC_URL to
+  // that endpoint in Render's environment variables instead of the shared one.
   relayerAdapter = factory({
     privateKey: process.env.RELAYER_PRIVATE_KEY,
     getPublicClient: ({ chain }) => createPublicClient({
       chain: ArcTestnetChain || chain,
-      transport: http(ARC_RPC_URL, { retryCount: 3, timeout: 15000 })
+      transport: http(ARC_RPC_URL, {
+        retryCount: 5,
+        timeout: 20000,
+        retryDelay: ({ count, error }) => {
+          const isRateLimited = error && (error.code === -32011 || /request limit/i.test(String(error.message || "")));
+          const base = isRateLimited ? 1500 : 300;
+          return Math.min(base * 2 ** count, 15000) + Math.floor(Math.random() * 300); // exponential backoff + jitter
+        }
+      })
     })
   });
   return relayerAdapter;
+}
+
+/* -------------------------------------------------------------------------
+   Extra retry wrapper around the two Circle App Kit calls that actually hit
+   Arc's RPC end-to-end (viem's own transport retry above only covers a
+   single JSON-RPC call — kit.estimateSwap/kit.swap make several in
+   sequence, and Circle's own request-limit errors don't always surface
+   through viem's retry path). Retries the whole call a few times with
+   backoff before giving up.
+   ------------------------------------------------------------------------- */
+async function withRpcRetry(fn, { retries = 4, baseDelayMs = 1500 } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const isRateLimited =
+        err?.code === -32011 ||
+        err?.cause?.code === -32011 ||
+        /request limit/i.test(String(err?.message || "")) ||
+        /NETWORK_CONNECTION_FAILED/i.test(String(err?.message || ""));
+      if (!isRateLimited || attempt === retries) throw err;
+      const delay = baseDelayMs * 2 ** attempt + Math.floor(Math.random() * 400);
+      console.warn(`RPC rate-limited, retrying in ${delay}ms (attempt ${attempt + 1}/${retries})`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
 }
 
 /* -------------------------------------------------------------------------
@@ -188,11 +235,11 @@ app.post("/api/quote", rateLimit, async (req, res) => {
 
     const adapter = await getRelayerAdapter();
     const config = process.env.KIT_KEY ? { kitKey: process.env.KIT_KEY } : {};
-    const estimate = await kit.estimateSwap({
+    const estimate = await withRpcRetry(() => kit.estimateSwap({
       from: { adapter, chain: "Arc_Testnet" },
       tokenIn, tokenOut, amountIn: String(amountIn),
       config
-    });
+    }));
     res.json(estimate);
   } catch (err) {
     console.error("quote failed", err);
@@ -282,11 +329,11 @@ app.post("/api/swap", rateLimit, async (req, res) => {
     // --- Run the real swap using the server-side adapter ---
     const adapter = await getRelayerAdapter();
     const config = process.env.KIT_KEY ? { kitKey: process.env.KIT_KEY } : {};
-    const swapResult = await kit.swap({
+    const swapResult = await withRpcRetry(() => kit.swap({
       from: { adapter, chain: "Arc_Testnet" },
       tokenIn, tokenOut, amountIn: String(amountIn),
       config
-    });
+    }));
 
     // --- Pay the user back in tokenOut ---
     const tokenOutInfo = TOKENS[tokenOut];
