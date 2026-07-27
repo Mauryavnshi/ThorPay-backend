@@ -322,7 +322,7 @@
         if (customField) customField.style.display = "none";
         document.getElementById("slippageCustomChip").innerText = "Custom";
         selectedSlippage = Number(chip.dataset.slip);
-        scheduleEstimate();
+        updateMinReceivedOnly();
       }
     });
   });
@@ -343,7 +343,7 @@
     const customChip = document.getElementById("slippageCustomChip");
     if (customChip) customChip.innerText = v + "%";
     if (slippageCustomStatus) { slippageCustomStatus.innerText = ""; }
-    scheduleEstimate();
+    updateMinReceivedOnly();
   }
 
   if (slippageCustomInput) {
@@ -424,6 +424,28 @@
     estimateTimer = setTimeout(runEstimate, 500);
   }
 
+  // Slippage only affects the "Min. received" line, not the actual
+  // exchange rate — so when only slippage changes (amount/tokens the same),
+  // recompute it instantly from the last quote instead of hitting the
+  // backend again. That was the "slow after changing slippage" complaint.
+  let lastQuote = null; // { tokenIn, tokenOut, amt, outAmount }
+  function updateMinReceivedOnly() {
+    const minReceivedEl = document.getElementById("swapMinReceived");
+    const tokenIn = document.getElementById("swapFromToken").value;
+    const tokenOut = document.getElementById("swapToToken").value;
+    const amt = document.getElementById("swapFromAmt").value;
+    if (lastQuote && lastQuote.tokenIn === tokenIn && lastQuote.tokenOut === tokenOut && lastQuote.amt === amt) {
+      if (minReceivedEl) {
+        const minReceived = lastQuote.outAmount * (1 - selectedSlippage / 100);
+        minReceivedEl.innerText = minReceived.toFixed(4) + " " + tokenOut + " (" + selectedSlippage + "% slippage)";
+      }
+      return;
+    }
+    // No cached quote for this exact amount/pair yet (e.g. slippage changed
+    // before any quote was ever fetched) — fall back to a real fetch.
+    scheduleEstimate();
+  }
+
   async function runEstimate() {
     const routeStatus = document.getElementById("swapRouteStatus");
     const minReceivedEl = document.getElementById("swapMinReceived");
@@ -476,6 +498,7 @@
 
       const outAmount = Number(data.estimatedOutput?.amount ?? data.amountOut);
       toAmt.value = outAmount.toFixed(4);
+      lastQuote = { tokenIn, tokenOut, amt, outAmount };
       updateUsdHint("swapToUsd", tokenOut, outAmount);
       if (routeStatus) routeStatus.innerText = "\u2248 " + outAmount.toFixed(4) + " " + tokenOut;
 
@@ -493,6 +516,7 @@
       }
     } catch (err) {
       console.error("quote failed", err);
+      lastQuote = null;
       toAmt.value = "";
       if (minReceivedEl) minReceivedEl.innerText = "\u2014";
       if (feeEl) feeEl.innerText = "\u2014";
