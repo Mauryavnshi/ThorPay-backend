@@ -99,12 +99,27 @@ console.log("  " + relayerWallet.address);
 const kit = new AppKit();
 let relayerAdapter = null;
 
-const { createPublicClient, http, fallback } = require("viem");
+const { createPublicClient, createWalletClient, http, fallback } = require("viem");
 let ArcTestnetChain = null;
 try {
   ({ ArcTestnet: ArcTestnetChain } = require("@circle-fin/app-kit/chains"));
 } catch (e) {
   console.warn("Could not load ArcTestnet chain definition from @circle-fin/app-kit/chains — falling back to App Kit's default chain resolution.", e.message);
+}
+
+function arcTransport() {
+  return fallback(
+    ARC_RPC_FALLBACK_LIST.map(url => http(url, {
+      retryCount: 3,
+      timeout: 20000,
+      retryDelay: ({ count, error }) => {
+        const isRateLimited = error && (error.code === -32011 || /request limit/i.test(String(error.message || "")));
+        const base = isRateLimited ? 2000 : 300;
+        return Math.min(base * 2 ** count, 20000) + Math.floor(Math.random() * 300); // exponential backoff + jitter
+      }
+    })),
+    { rank: false }
+  );
 }
 
 async function getRelayerAdapter() {
@@ -121,7 +136,17 @@ async function getRelayerAdapter() {
   // App Kit's own default RPC connection for Arc Testnet was throwing
   // "Network connection failed for Arc Testnet" on every swap/quote call.
   // Per https://docs.arc.io/app-kit/tutorials/adapter-setups, overriding
-  // getPublicClient with our own RPC fixes that.
+  // getPublicClient with our own RPC fixes that for READS (quotes, receipt
+  // polling, gas estimation, etc).
+  //
+  // But actual swap EXECUTION still failed the same way even with that in
+  // place — because sendTransaction goes through a separate, independently
+  // constructed WALLET client, not the public client. The adapter's type
+  // definitions (index.d.ts) confirm a matching getWalletClient override
+  // exists for exactly this: "If not provided, a default wallet client will
+  // be created using the derived account and HTTP transport with default
+  // RPC endpoints" — those defaults are what were broken. Overriding both
+  // clients with the same fallback transport fixes reads AND writes.
   //
   // On top of that, Arc's shared public RPC rate limits fast (JSON-RPC code
   // -32011 "request limit reached") once more than a couple requests land
@@ -134,18 +159,12 @@ async function getRelayerAdapter() {
     privateKey: process.env.RELAYER_PRIVATE_KEY,
     getPublicClient: ({ chain }) => createPublicClient({
       chain: ArcTestnetChain || chain,
-      transport: fallback(
-        ARC_RPC_FALLBACK_LIST.map(url => http(url, {
-          retryCount: 3,
-          timeout: 20000,
-          retryDelay: ({ count, error }) => {
-            const isRateLimited = error && (error.code === -32011 || /request limit/i.test(String(error.message || "")));
-            const base = isRateLimited ? 2000 : 300;
-            return Math.min(base * 2 ** count, 20000) + Math.floor(Math.random() * 300); // exponential backoff + jitter
-          }
-        })),
-        { rank: false }
-      )
+      transport: arcTransport()
+    }),
+    getWalletClient: ({ chain, account }) => createWalletClient({
+      chain: ArcTestnetChain || chain,
+      account,
+      transport: arcTransport()
     })
   });
   return relayerAdapter;
