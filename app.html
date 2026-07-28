@@ -97,30 +97,20 @@
     </div>
 
     <div class="balrow" style="margin:10px 2px 0;">
-      <span>Slippage tolerance</span>
-      <div class="pct" id="slippageChips">
-        <span data-slip="0.1">0.1%</span>
-        <span data-slip="0.5" class="active">0.5%</span>
-        <span data-slip="1">1%</span>
-        <span data-slip="custom" id="slippageCustomChip">Custom</span>
-      </div>
-    </div>
-    <div class="field" id="slippageCustomField" style="display:none; margin-top:6px;">
-      <div class="flabel">Custom slippage %</div>
-      <div class="row">
-        <input type="number" id="slippageCustomInput" placeholder="e.g. 2.5" min="0" max="50" step="0.1" />
-        <button type="button" id="slippageCustomOk" class="btn btn-outline" style="white-space:nowrap;">OK</button>
-      </div>
-      <div class="usd-hint" id="slippageCustomStatus" style="margin-top:4px;"></div>
+      <span>Slippage: <span id="slippageDisplay">0.5%</span></span>
+      <span class="settings-link" id="openSwapSettings">⚙ Swap Settings</span>
     </div>
 
     <div class="route-box">
       <div class="rline"><span>Route</span><span>Swap relayer · Circle App Kit</span></div>
-      <div class="rline"><span>Status</span><span id="swapRouteStatus">Enter an amount to see a quote</span></div>
-      <div class="rline"><span>Min. received</span><span id="swapMinReceived">—</span></div>
-      <div class="rline"><span>Swap fee</span><span id="swapProviderFee">—</span></div>
-      <div class="rline"><span>Est. network fee</span><span id="swapGasFee">—</span></div>
     </div>
+    <!-- Kept in the DOM (hidden) so the existing quote logic has somewhere
+         to write without touching every call site — only "Route" above is
+         meant to be visible to the person using the app. -->
+    <span id="swapRouteStatus" style="display:none;"></span>
+    <span id="swapMinReceived" style="display:none;"></span>
+    <span id="swapProviderFee" style="display:none;"></span>
+    <span id="swapGasFee" style="display:none;"></span>
 
     <details class="advanced-toggle" id="relayerAdvanced">
       <summary>Advanced — relayer server URL</summary>
@@ -144,6 +134,45 @@
       URL into "Advanced" above if it's not the default baked in below,
       and it's saved in this browser for next time.
     -->
+  </div>
+
+  <!-- Swap Settings modal -->
+  <div class="modal-overlay" id="swapSettingsOverlay" style="display:none;">
+    <div class="modal">
+      <div class="modal-head">
+        <h3>Swap Settings</h3>
+        <span class="modal-close" id="closeSwapSettingsX">&times;</span>
+      </div>
+      <div class="flabel">Slippage</div>
+      <div class="pct" id="slippageChips">
+        <span data-slip="0.1">0.1%</span>
+        <span data-slip="0.2">0.2%</span>
+        <span data-slip="0.5" class="active">0.5%</span>
+        <span data-slip="1">1%</span>
+        <span data-slip="5">5%</span>
+      </div>
+      <div class="flabel" style="margin-top:16px;">Custom</div>
+      <div class="row">
+        <input type="number" id="slippageCustomInput" placeholder="0.1 - 50" min="0.1" max="50" step="0.1" />
+      </div>
+      <div class="usd-hint" id="slippageCustomStatus" style="margin-top:4px;"></div>
+      <div class="modal-actions">
+        <button class="btn btn-outline" id="cancelSwapSettings">Cancel</button>
+        <button class="btn btn-primary" id="saveSwapSettings">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Swap Success modal -->
+  <div class="modal-overlay" id="swapSuccessOverlay" style="display:none;">
+    <div class="modal">
+      <div class="modal-check">&check;</div>
+      <h3 class="success-title">Swap completed successfully</h3>
+      <div class="received-label">Received</div>
+      <div class="received-amount" id="successAmount">—</div>
+      <a class="btn btn-primary btn-block" id="viewOnExplorerBtn" target="_blank" rel="noopener">View on Explorer</a>
+      <button class="btn btn-outline btn-block" id="closeSwapSuccess" style="margin-top:8px;">Close</button>
+    </div>
   </div>
 
   <!-- BRIDGE -->
@@ -295,72 +324,81 @@
     return cachedRelayerAddress;
   }
 
-  document.querySelectorAll("#slippageChips span").forEach(chip => {
-    chip.addEventListener("click", () => {
-      // Re-opening "Custom" after it's already applied should re-open the
-      // editor, not just re-apply the same value silently.
-      if (chip.dataset.slip === "custom" && chip.classList.contains("active")) {
-        const customField = document.getElementById("slippageCustomField");
-        if (customField) customField.style.display = "block";
-        const customInput = document.getElementById("slippageCustomInput");
-        if (customInput) customInput.focus();
-        return;
-      }
-      document.querySelectorAll("#slippageChips span").forEach(c => c.classList.remove("active"));
-      chip.classList.add("active");
-      const customField = document.getElementById("slippageCustomField");
-      if (chip.dataset.slip === "custom") {
-        if (customField) customField.style.display = "block";
-        const customInput = document.getElementById("slippageCustomInput");
-        const customStatus = document.getElementById("slippageCustomStatus");
-        if (customInput) {
-          customInput.value = "";
-          customInput.focus();
-        }
-        if (customStatus) { customStatus.innerText = ""; }
-      } else {
-        if (customField) customField.style.display = "none";
-        document.getElementById("slippageCustomChip").innerText = "Custom";
-        selectedSlippage = Number(chip.dataset.slip);
-        updateMinReceivedOnly();
-      }
-    });
-  });
-
+  const swapSettingsOverlay = document.getElementById("swapSettingsOverlay");
   const slippageCustomInput = document.getElementById("slippageCustomInput");
   const slippageCustomStatus = document.getElementById("slippageCustomStatus");
-  const slippageCustomOk = document.getElementById("slippageCustomOk");
+  let pendingSlippage = selectedSlippage; // staged value inside the modal, only committed on Save
 
-  function applyCustomSlippage() {
-    const v = Number(slippageCustomInput.value);
-    if (!slippageCustomInput.value || !(v > 0 && v <= 50)) {
-      if (slippageCustomStatus) { slippageCustomStatus.innerText = "Enter a value between 0 and 50"; slippageCustomStatus.style.color = "var(--red)"; }
-      return;
-    }
-    selectedSlippage = v;
-    const customField = document.getElementById("slippageCustomField");
-    if (customField) customField.style.display = "none";
-    const customChip = document.getElementById("slippageCustomChip");
-    if (customChip) customChip.innerText = v + "%";
-    if (slippageCustomStatus) { slippageCustomStatus.innerText = ""; }
-    updateMinReceivedOnly();
+  function paintSlippageChips(value) {
+    document.querySelectorAll("#slippageChips span").forEach(c => {
+      c.classList.toggle("active", Number(c.dataset.slip) === value);
+    });
   }
+
+  function openSwapSettings() {
+    pendingSlippage = selectedSlippage;
+    paintSlippageChips(selectedSlippage);
+    // Only prefill Custom if the current slippage isn't one of the preset chips.
+    const isPreset = ["0.1", "0.2", "0.5", "1", "5"].includes(String(selectedSlippage));
+    slippageCustomInput.value = isPreset ? "" : selectedSlippage;
+    slippageCustomStatus.innerText = "";
+    swapSettingsOverlay.style.display = "flex";
+  }
+  function closeSwapSettings() { swapSettingsOverlay.style.display = "none"; }
+
+  const openBtn = document.getElementById("openSwapSettings");
+  if (openBtn) openBtn.addEventListener("click", openSwapSettings);
+  const closeX = document.getElementById("closeSwapSettingsX");
+  if (closeX) closeX.addEventListener("click", closeSwapSettings);
+  document.getElementById("cancelSwapSettings").addEventListener("click", closeSwapSettings);
+  swapSettingsOverlay.addEventListener("click", (e) => { if (e.target === swapSettingsOverlay) closeSwapSettings(); });
+
+  document.querySelectorAll("#slippageChips span").forEach(chip => {
+    chip.addEventListener("click", () => {
+      pendingSlippage = Number(chip.dataset.slip);
+      paintSlippageChips(pendingSlippage);
+      slippageCustomInput.value = "";
+      slippageCustomStatus.innerText = "";
+    });
+  });
 
   if (slippageCustomInput) {
     slippageCustomInput.addEventListener("input", () => {
       const v = Number(slippageCustomInput.value);
       if (slippageCustomInput.value && v > 0 && v <= 50) {
-        if (slippageCustomStatus) { slippageCustomStatus.innerText = "Press OK to apply " + v + "% slippage"; slippageCustomStatus.style.color = ""; }
-      } else if (slippageCustomStatus) {
-        slippageCustomStatus.innerText = slippageCustomInput.value ? "Enter a value between 0 and 50" : "";
+        pendingSlippage = v;
+        paintSlippageChips(-1); // no preset chip matches a custom value
+        slippageCustomStatus.innerText = "";
+      } else {
+        slippageCustomStatus.innerText = slippageCustomInput.value ? "Enter a value between 0.1 and 50" : "";
         slippageCustomStatus.style.color = "var(--red)";
       }
     });
-    slippageCustomInput.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { e.preventDefault(); applyCustomSlippage(); }
-    });
   }
-  if (slippageCustomOk) slippageCustomOk.addEventListener("click", applyCustomSlippage);
+
+  document.getElementById("saveSwapSettings").addEventListener("click", () => {
+    if (slippageCustomInput.value) {
+      const v = Number(slippageCustomInput.value);
+      if (!(v > 0 && v <= 50)) {
+        slippageCustomStatus.innerText = "Enter a value between 0.1 and 50";
+        slippageCustomStatus.style.color = "var(--red)";
+        return;
+      }
+    }
+    // Applying only touches min-received against the quote already on
+    // screen — the amount you typed stays exactly as it is, no need to
+    // re-enter it.
+    selectedSlippage = pendingSlippage;
+    document.getElementById("slippageDisplay").innerText = selectedSlippage + "%";
+    updateMinReceivedOnly();
+    closeSwapSettings();
+  });
+
+  const swapSuccessOverlay = document.getElementById("swapSuccessOverlay");
+  document.getElementById("closeSwapSuccess").addEventListener("click", () => {
+    swapSuccessOverlay.style.display = "none";
+  });
+  swapSuccessOverlay.addEventListener("click", (e) => { if (e.target === swapSuccessOverlay) swapSuccessOverlay.style.display = "none"; });
 
   // Arc's gas token IS USDC, so a rough gas estimate can be shown in USDC
   // directly. Two on-chain legs happen for a swap here (deposit transfer +
@@ -621,12 +659,15 @@
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
 
-        statusEl.className = "status ok";
-        statusEl.innerText = "Swapped! Received " + data.amountOut + " " + tokenOut + ". Payout tx: " + data.payoutTxHash;
+        statusEl.className = ""; statusEl.innerText = "";
         window.ThorPay.addHistory("SWAP", amt + " " + tokenIn + " \u2192 " + data.amountOut + " " + tokenOut, data.payoutTxHash);
         await window.ThorPay.refreshBalances();
         document.getElementById("swapFromAmt").value = "";
         document.getElementById("swapToAmt").value = "";
+
+        document.getElementById("successAmount").innerText = data.amountOut + " " + tokenOut;
+        document.getElementById("viewOnExplorerBtn").href = window.ThorPay.explorerTxUrl(data.payoutTxHash);
+        document.getElementById("swapSuccessOverlay").style.display = "flex";
       } catch (err) {
         console.error("swap failed", err);
         statusEl.className = "status err";
