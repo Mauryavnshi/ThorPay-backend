@@ -891,5 +891,6 @@ window.ThorPay = {
     const hex = await window.ethereum.request({ method: "eth_gasPrice" });
     return ethers.BigNumber.from(hex);
   },
-  nativeDecimals: CONFIG.nativeCurrency.decimals
+  nativeDecimals: CONFIG.nativeCurrency.decimals,
+  explorerTxUrl: (txHash) => CONFIG.blockExplorerUrls[0] + "/tx/" + txHash
 };
