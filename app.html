@@ -96,9 +96,27 @@
       <div class="balrow"><span id="swapToBal">Balance: 0.00</span></div>
     </div>
 
-    <div class="balrow" style="margin:10px 2px 0;">
+    <div class="balrow settings-wrap" style="margin:10px 2px 0;">
       <span>Slippage: <span id="slippageDisplay">0.5%</span></span>
-      <span class="settings-link" id="openSwapSettings">⚙ Swap Settings</span>
+      <span class="settings-link" id="openSwapSettings">⚙ Settings</span>
+
+      <div class="popover" id="swapSettingsPopover" style="display:none;">
+        <div class="flabel">Slippage tolerance</div>
+        <div class="pct" id="slippageChips">
+          <span data-slip="0.1">0.1%</span>
+          <span data-slip="0.2">0.2%</span>
+          <span data-slip="0.5" class="active">0.5%</span>
+          <span data-slip="1">1%</span>
+          <span data-slip="5">5%</span>
+        </div>
+        <div class="flabel" style="margin-top:12px;">Custom</div>
+        <input type="number" id="slippageCustomInput" placeholder="0.1 - 50" min="0.1" max="50" step="0.1" />
+        <div class="usd-hint" id="slippageCustomStatus" style="margin-top:4px;"></div>
+        <div class="popover-actions">
+          <button class="btn btn-outline" id="cancelSwapSettings">Cancel</button>
+          <button class="btn btn-primary" id="saveSwapSettings">Save</button>
+        </div>
+      </div>
     </div>
 
     <div class="route-box">
@@ -136,42 +154,16 @@
     -->
   </div>
 
-  <!-- Swap Settings modal -->
-  <div class="modal-overlay" id="swapSettingsOverlay" style="display:none;">
-    <div class="modal">
-      <div class="modal-head">
-        <h3>Swap Settings</h3>
-        <span class="modal-close" id="closeSwapSettingsX">&times;</span>
+  <!-- Swap success toast — compact, top-right, not a blocking modal -->
+  <div class="toast-wrap" id="swapSuccessToast" style="display:none;">
+    <div class="toast">
+      <div class="toast-icon">&check;</div>
+      <div class="toast-body">
+        <div class="toast-title">Swap completed</div>
+        <div class="toast-amount" id="successAmount">—</div>
+        <a class="toast-link" id="viewOnExplorerBtn" target="_blank" rel="noopener">View on Explorer →</a>
       </div>
-      <div class="flabel">Slippage</div>
-      <div class="pct" id="slippageChips">
-        <span data-slip="0.1">0.1%</span>
-        <span data-slip="0.2">0.2%</span>
-        <span data-slip="0.5" class="active">0.5%</span>
-        <span data-slip="1">1%</span>
-        <span data-slip="5">5%</span>
-      </div>
-      <div class="flabel" style="margin-top:16px;">Custom</div>
-      <div class="row">
-        <input type="number" id="slippageCustomInput" placeholder="0.1 - 50" min="0.1" max="50" step="0.1" />
-      </div>
-      <div class="usd-hint" id="slippageCustomStatus" style="margin-top:4px;"></div>
-      <div class="modal-actions">
-        <button class="btn btn-outline" id="cancelSwapSettings">Cancel</button>
-        <button class="btn btn-primary" id="saveSwapSettings">Save</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Swap Success modal -->
-  <div class="modal-overlay" id="swapSuccessOverlay" style="display:none;">
-    <div class="modal">
-      <div class="modal-check">&check;</div>
-      <h3 class="success-title">Swap completed successfully</h3>
-      <div class="received-label">Received</div>
-      <div class="received-amount" id="successAmount">—</div>
-      <a class="btn btn-primary btn-block" id="viewOnExplorerBtn" target="_blank" rel="noopener">View on Explorer</a>
-      <button class="btn btn-outline btn-block" id="closeSwapSuccess" style="margin-top:8px;">Close</button>
+      <span class="toast-close" id="closeSwapSuccess">&times;</span>
     </div>
   </div>
 
@@ -180,28 +172,31 @@
     <h2>Bridge (CCTP)</h2>
     <div class="field">
       <div class="flabel">From</div>
+      <select id="bridgeFromChain" style="width:100%;margin-bottom:10px;">
+        <option value="arc">Arc Testnet</option>
+        <option value="ethSepolia">Ethereum Sepolia</option>
+        <option value="baseSepolia">Base Sepolia</option>
+        <option value="arbSepolia">Arbitrum Sepolia</option>
+      </select>
       <div class="row">
         <input type="number" id="bridgeFromAmt" placeholder="0.00" min="0" step="0.000001" />
         <select id="bridgeFromToken"><option value="USDC">USDC</option></select>
       </div>
       <div class="balrow"><span id="bridgeFromBal">Balance: 0.00</span></div>
-      <select id="bridgeFromChain" style="margin-top:8px;width:100%;">
-        <option value="arc">Arc Testnet</option>
-      </select>
     </div>
     <div class="swap-arrow">→</div>
     <div class="field">
       <div class="flabel">To</div>
-      <div class="row"><input type="text" id="bridgeToAmt" placeholder="0.00" disabled /><span>USDC</span></div>
-      <select id="bridgeToChain" style="margin-top:8px;width:100%;">
+      <select id="bridgeToChain" style="width:100%;margin-bottom:10px;">
         <option value="ethSepolia">Ethereum Sepolia</option>
         <option value="baseSepolia">Base Sepolia</option>
+        <option value="arbSepolia">Arbitrum Sepolia</option>
       </select>
+      <div class="row"><input type="text" id="bridgeToAmt" placeholder="0.00" disabled /><span>USDC</span></div>
       <div class="balrow"><span id="bridgeToBal">Connect your wallet to see this balance</span></div>
     </div>
     <div class="route-box">
       <div class="rline"><span>Protocol</span><span>Circle CCTP V2</span></div>
-      <div class="rline"><span>Steps</span><span>Approve → Burn (Arc) → Attestation → Mint (destination)</span></div>
     </div>
     <button class="btn btn-primary btn-block" id="bridgeBtn">Connect wallet to bridge</button>
     <button class="btn btn-primary btn-block" id="bridgeMintBtn" style="display:none;margin-top:8px;">Complete mint on destination chain</button>
@@ -209,12 +204,14 @@
     <div class="status" id="bridgeStatus"></div>
     <div class="hint" id="bridgeProgress" style="display:none;"></div>
     <!--
-      This burns real USDC on Arc Testnet through Circle's TokenMessengerV2, waits for
-      Circle's Iris attestation, then — once you click "Complete mint" — switches MetaMask
-      to your destination chain and calls receiveMessage on that chain's MessageTransmitterV2
-      for you. CCTP V2 testnet contracts share the same address across chains (verified on
-      Ethereum Sepolia and Base Sepolia). MetaMask briefly switches networks during the mint
-      step, then switches back.
+      Works between any 2 of the 4 chains in CONFIG.chains (Arc, Ethereum
+      Sepolia, Base Sepolia, Arbitrum Sepolia) — picking a FROM chain
+      switches MetaMask to it before burning; the mint step already switched
+      to the TO chain the same way. CCTP V2 testnet contracts share the same
+      address across all 4 (deterministic deploy), so no per-chain contract
+      config is needed beyond each chain's own USDC address. MetaMask always
+      ends back on Arc once a bridge finishes, since the rest of the app
+      (Swap/Send/balances) assumes Arc.
     -->
   </div>
 
@@ -324,7 +321,7 @@
     return cachedRelayerAddress;
   }
 
-  const swapSettingsOverlay = document.getElementById("swapSettingsOverlay");
+  const swapSettingsPopover = document.getElementById("swapSettingsPopover");
   const slippageCustomInput = document.getElementById("slippageCustomInput");
   const slippageCustomStatus = document.getElementById("slippageCustomStatus");
   let pendingSlippage = selectedSlippage; // staged value inside the modal, only committed on Save
@@ -342,16 +339,20 @@
     const isPreset = ["0.1", "0.2", "0.5", "1", "5"].includes(String(selectedSlippage));
     slippageCustomInput.value = isPreset ? "" : selectedSlippage;
     slippageCustomStatus.innerText = "";
-    swapSettingsOverlay.style.display = "flex";
+    swapSettingsPopover.style.display = "block";
   }
-  function closeSwapSettings() { swapSettingsOverlay.style.display = "none"; }
+  function closeSwapSettings() { swapSettingsPopover.style.display = "none"; }
 
   const openBtn = document.getElementById("openSwapSettings");
-  if (openBtn) openBtn.addEventListener("click", openSwapSettings);
-  const closeX = document.getElementById("closeSwapSettingsX");
-  if (closeX) closeX.addEventListener("click", closeSwapSettings);
+  if (openBtn) openBtn.addEventListener("click", (e) => { e.stopPropagation(); openSwapSettings(); });
   document.getElementById("cancelSwapSettings").addEventListener("click", closeSwapSettings);
-  swapSettingsOverlay.addEventListener("click", (e) => { if (e.target === swapSettingsOverlay) closeSwapSettings(); });
+  // Click-outside-to-close, instead of a full-screen backdrop.
+  document.addEventListener("click", (e) => {
+    if (swapSettingsPopover.style.display === "block" && !swapSettingsPopover.contains(e.target) && e.target !== openBtn) {
+      closeSwapSettings();
+    }
+  });
+  swapSettingsPopover.addEventListener("click", (e) => e.stopPropagation());
 
   document.querySelectorAll("#slippageChips span").forEach(chip => {
     chip.addEventListener("click", () => {
@@ -394,11 +395,17 @@
     closeSwapSettings();
   });
 
-  const swapSuccessOverlay = document.getElementById("swapSuccessOverlay");
+  const swapSuccessToast = document.getElementById("swapSuccessToast");
+  let toastTimer = null;
+  function showSuccessToast() {
+    swapSuccessToast.style.display = "block";
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { swapSuccessToast.style.display = "none"; }, 12000);
+  }
   document.getElementById("closeSwapSuccess").addEventListener("click", () => {
-    swapSuccessOverlay.style.display = "none";
+    clearTimeout(toastTimer);
+    swapSuccessToast.style.display = "none";
   });
-  swapSuccessOverlay.addEventListener("click", (e) => { if (e.target === swapSuccessOverlay) swapSuccessOverlay.style.display = "none"; });
 
   // Arc's gas token IS USDC, so a rough gas estimate can be shown in USDC
   // directly. Two on-chain legs happen for a swap here (deposit transfer +
@@ -667,7 +674,7 @@
 
         document.getElementById("successAmount").innerText = data.amountOut + " " + tokenOut;
         document.getElementById("viewOnExplorerBtn").href = window.ThorPay.explorerTxUrl(data.payoutTxHash);
-        document.getElementById("swapSuccessOverlay").style.display = "flex";
+        showSuccessToast();
       } catch (err) {
         console.error("swap failed", err);
         statusEl.className = "status err";
