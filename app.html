@@ -258,342 +258,352 @@
      trace confirms LI.FI is the actual engine behind Circle App Kit's Swap
      on Arc (wallet -> Adapter -> LiFiDiamond -> CurveStableSwap pool).
      Calling LI.FI directly instead of going through Circle's App Kit
-     browser SDK sidesteps the CORS wall on api.circle.com (LI.FI's API is
-     built for direct dApp use and explicitly added Arc Testnet support).
-     Fully non-custodial: approve + execute happen straight from the
-     connected wallet, no relayer backend involved. Depends on
-     window.ThorPay exposed at the bottom of script.js for wallet state +
-     shared UI helpers.
+     browser SDK sidesteps the CORS wall on api.circle.com (LI.FI's own API
+     is built for direct dApp use and explicitly added Arc Testnet
+     support). Fully non-custodial: approve + execute happen straight from
+     the connected wallet, no relayer backend involved.
 
-     esm.sh serves @lifi/sdk and viem as browser ES modules on the fly —
-     versions aren't pinned here, so if this ever breaks after an upstream
-     package release, pin exact versions (check npm for current numbers).
-     I couldn't test this live end-to-end (no browser/network access on my
-     end) — if the browser console shows an error on first use, send it
-     over and I'll fix it. -->
-<script type="module">
-import { createConfig, EVM, getQuote, convertQuoteToRoute, executeRoute } from "https://esm.sh/@lifi/sdk";
-import { createWalletClient, custom, parseUnits, formatUnits } from "https://esm.sh/viem";
+     IMPORTANT: this is a plain classic script tag, not type="module". LI.FI
+     and viem are loaded with a dynamic import() inside runEstimate/swapBtn
+     instead of static top-level imports, on purpose — a static import
+     failure (esm.sh hiccup, network blip, wrong export name after an
+     upstream release) used to crash this ENTIRE script block, which is
+     why Slippage Settings broke along with Swap the first time. Now the
+     popover/toast/UI wiring below runs immediately regardless of whether
+     LI.FI ever loads, and only the swap/quote logic depends on it — with
+     any load failure caught and shown directly in the Swap panel instead
+     of only in the browser console.
 
-// Arc Testnet isn't in viem's built-in chain list, so LI.FI's EVM provider
-// needs a manual Chain object — same values as CONFIG.chains.arc in
-// script.js (kept separate because this is a module and can't see that
-// classic script's top-level `const CONFIG`).
-const ARC_CHAIN = {
-  id: 5042002,
-  name: "Arc Testnet",
-  nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
-  rpcUrls: { default: { http: ["https://rpc.testnet.arc.network"] } },
-  blockExplorers: { default: { name: "Arcscan", url: "https://testnet.arcscan.app" } }
-};
+     Depends on window.ThorPay exposed at the bottom of script.js for
+     wallet state + shared UI helpers. Versions aren't pinned on the esm.sh
+     URLs — if this breaks after an upstream release, pin exact versions
+     (check npm for current numbers). -->
+<script>
+(function () {
+  const ARC_CHAIN = {
+    id: 5042002,
+    name: "Arc Testnet",
+    nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
+    rpcUrls: { default: { http: ["https://rpc.testnet.arc.network"] } },
+    blockExplorers: { default: { name: "Arcscan", url: "https://testnet.arcscan.app" } }
+  };
+  const TOKEN_ADDR = {
+    USDC: "0x3600000000000000000000000000000000000000",
+    EURC: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
+    CIRBTC: "0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF"
+  };
+  const TOKEN_DECIMALS = { USDC: 6, EURC: 6, CIRBTC: 8 };
 
-const TOKEN_ADDR = {
-  USDC: "0x3600000000000000000000000000000000000000",
-  EURC: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
-  CIRBTC: "0xf0C4a4CE82A5746AbAAd9425360Ab04fbBA432BF"
-};
-const TOKEN_DECIMALS = { USDC: 6, EURC: 6, CIRBTC: 8 };
+  /* -----------------------------------------------------------------------
+     Slippage Settings popover, success toast — no LI.FI/viem dependency at
+     all, so these always work even if the LI.FI load below fails.
+     ----------------------------------------------------------------------- */
+  let selectedSlippage = 0.5;
+  let pendingSlippage = selectedSlippage;
+  let lastQuote = null; // { tokenIn, tokenOut, amt, outAmount, quote }
 
-let currentWalletClient = null;
-function buildWalletClient() {
-  currentWalletClient = createWalletClient({ chain: ARC_CHAIN, transport: custom(window.ethereum) });
-  return currentWalletClient;
-}
-
-createConfig({
-  integrator: "ThorPay",
-  providers: [
-    EVM({
-      getWalletClient: async () => currentWalletClient || buildWalletClient(),
-      // Swap only runs on Arc right now, so this should never actually be
-      // asked to switch — LI.FI's EVM provider requires the hook to exist.
-      switchChain: async (chainId) => {
-        if (chainId !== ARC_CHAIN.id) {
-          throw new Error("Swap only supports Arc Testnet right now.");
-        }
-        return buildWalletClient();
-      }
-    })
-  ]
-});
-
-let selectedSlippage = 0.5; // percent
-let pendingSlippage = selectedSlippage;
-let lastQuote = null; // { tokenIn, tokenOut, amt, outAmount, quote } — for the settings popover's instant re-price
-
-function paintSlippageChips(value) {
-  document.querySelectorAll("#slippageChips span").forEach(c => {
-    c.classList.toggle("active", Number(c.dataset.slip) === value);
-  });
-}
-
-const swapSettingsPopover = document.getElementById("swapSettingsPopover");
-const slippageCustomInput = document.getElementById("slippageCustomInput");
-const slippageCustomStatus = document.getElementById("slippageCustomStatus");
-
-function openSwapSettings() {
-  pendingSlippage = selectedSlippage;
-  paintSlippageChips(selectedSlippage);
-  const isPreset = ["0.1", "0.2", "0.5", "1", "5"].includes(String(selectedSlippage));
-  slippageCustomInput.value = isPreset ? "" : selectedSlippage;
-  slippageCustomStatus.innerText = "";
-  swapSettingsPopover.style.display = "block";
-}
-function closeSwapSettings() { swapSettingsPopover.style.display = "none"; }
-
-const openBtn = document.getElementById("openSwapSettings");
-if (openBtn) openBtn.addEventListener("click", (e) => { e.stopPropagation(); openSwapSettings(); });
-document.getElementById("cancelSwapSettings").addEventListener("click", closeSwapSettings);
-document.addEventListener("click", (e) => {
-  if (swapSettingsPopover.style.display === "block" && !swapSettingsPopover.contains(e.target) && e.target !== openBtn) {
-    closeSwapSettings();
-  }
-});
-swapSettingsPopover.addEventListener("click", (e) => e.stopPropagation());
-
-document.querySelectorAll("#slippageChips span").forEach(chip => {
-  chip.addEventListener("click", () => {
-    pendingSlippage = Number(chip.dataset.slip);
-    paintSlippageChips(pendingSlippage);
-    slippageCustomInput.value = "";
-    slippageCustomStatus.innerText = "";
-  });
-});
-
-if (slippageCustomInput) {
-  slippageCustomInput.addEventListener("input", () => {
-    const v = Number(slippageCustomInput.value);
-    if (slippageCustomInput.value && v > 0 && v <= 50) {
-      pendingSlippage = v;
-      paintSlippageChips(-1);
-      slippageCustomStatus.innerText = "";
-    } else {
-      slippageCustomStatus.innerText = slippageCustomInput.value ? "Enter a value between 0.1 and 50" : "";
-      slippageCustomStatus.style.color = "var(--red)";
-    }
-  });
-}
-
-document.getElementById("saveSwapSettings").addEventListener("click", () => {
-  if (slippageCustomInput.value) {
-    const v = Number(slippageCustomInput.value);
-    if (!(v > 0 && v <= 50)) {
-      slippageCustomStatus.innerText = "Enter a value between 0.1 and 50";
-      slippageCustomStatus.style.color = "var(--red)";
-      return;
-    }
-  }
-  selectedSlippage = pendingSlippage;
-  document.getElementById("slippageDisplay").innerText = selectedSlippage + "%";
-  // Slippage only changes execution tolerance, not LI.FI's quoted output —
-  // re-run the quote so "min received" (computed from it) stays accurate,
-  // but the amount typed in FROM never has to be re-entered.
-  scheduleEstimate();
-  closeSwapSettings();
-});
-
-const swapSuccessToast = document.getElementById("swapSuccessToast");
-let toastTimer = null;
-function showSuccessToast() {
-  swapSuccessToast.style.display = "block";
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { swapSuccessToast.style.display = "none"; }, 12000);
-}
-document.getElementById("closeSwapSuccess").addEventListener("click", () => {
-  clearTimeout(toastTimer);
-  swapSuccessToast.style.display = "none";
-});
-
-let estimateTimer = null;
-function scheduleEstimate() {
-  clearTimeout(estimateTimer);
-  estimateTimer = setTimeout(runEstimate, 500);
-}
-
-async function runEstimate() {
-  const routeStatus = document.getElementById("swapRouteStatus");
-  const toAmt = document.getElementById("swapToAmt");
-  const amt = document.getElementById("swapFromAmt").value;
-  const tokenIn = document.getElementById("swapFromToken").value;
-  const tokenOut = document.getElementById("swapToToken").value;
-
-  updateUsdHint("swapFromUsd", tokenIn, amt);
-
-  if (!window.ThorPay || !window.ThorPay.getUserAddress()) {
-    if (routeStatus) routeStatus.innerText = "Connect your wallet to see a live quote";
-    lastQuote = null;
-    return;
-  }
-  if (tokenIn === tokenOut) {
-    toAmt.value = "";
-    document.getElementById("swapToUsd").innerText = "";
-    if (routeStatus) routeStatus.innerText = "Pick two different tokens";
-    lastQuote = null;
-    return;
-  }
-  if (!amt || Number(amt) <= 0) {
-    toAmt.value = "";
-    document.getElementById("swapToUsd").innerText = "";
-    if (routeStatus) routeStatus.innerText = "Enter an amount to see a quote";
-    lastQuote = null;
-    return;
-  }
-
-  try {
-    if (routeStatus) routeStatus.innerText = "Fetching route from LI.FI\u2026";
-    const fromAmountUnits = parseUnits(amt, TOKEN_DECIMALS[tokenIn]).toString();
-    const quote = await getQuote({
-      fromChain: ARC_CHAIN.id,
-      toChain: ARC_CHAIN.id,
-      fromToken: TOKEN_ADDR[tokenIn],
-      toToken: TOKEN_ADDR[tokenOut],
-      fromAmount: fromAmountUnits,
-      fromAddress: window.ThorPay.getUserAddress(),
-      slippage: selectedSlippage / 100
+  function paintSlippageChips(value) {
+    document.querySelectorAll("#slippageChips span").forEach(c => {
+      c.classList.toggle("active", Number(c.dataset.slip) === value);
     });
-
-    const outAmount = Number(formatUnits(BigInt(quote.estimate.toAmount), TOKEN_DECIMALS[tokenOut]));
-    toAmt.value = outAmount.toFixed(6);
-    updateUsdHint("swapToUsd", tokenOut, outAmount);
-    if (routeStatus) routeStatus.innerText = "\u2248 " + outAmount.toFixed(6) + " " + tokenOut + " via " + (quote.toolDetails?.name || "LI.FI");
-
-    lastQuote = { tokenIn, tokenOut, amt, outAmount, quote };
-  } catch (err) {
-    console.error("LI.FI quote failed", err);
-    toAmt.value = "";
-    document.getElementById("swapToUsd").innerText = "";
-    lastQuote = null;
-    const msg = err.message || String(err);
-    if (routeStatus) routeStatus.innerText = "Couldn't fetch a route: " + msg;
   }
-}
 
-// Cached USD prices via CoinGecko-style estimate isn't available client-side
-// without another API, so this only shows a hint when a same-token USD peg
-// is a safe assumption (USDC/EURC/cirBTC quoted amounts are already the
-// "real" number — this just skips a redundant fetch that used to hit our
-// own relayer's /api/rates, which no longer exists).
-function updateUsdHint() { /* no-op now that Swap has no backend to ask for a price feed */ }
+  const swapSettingsPopover = document.getElementById("swapSettingsPopover");
+  const slippageCustomInput = document.getElementById("slippageCustomInput");
+  const slippageCustomStatus = document.getElementById("slippageCustomStatus");
 
-const fromAmtEl = document.getElementById("swapFromAmt");
-if (fromAmtEl) fromAmtEl.addEventListener("input", scheduleEstimate);
-["swapFromToken", "swapToToken"].forEach(id => {
-  const el = document.getElementById(id);
-  if (el) el.addEventListener("change", scheduleEstimate);
-});
+  function openSwapSettings() {
+    pendingSlippage = selectedSlippage;
+    paintSlippageChips(selectedSlippage);
+    const isPreset = ["0.1", "0.2", "0.5", "1", "5"].includes(String(selectedSlippage));
+    slippageCustomInput.value = isPreset ? "" : selectedSlippage;
+    slippageCustomStatus.innerText = "";
+    swapSettingsPopover.style.display = "block";
+  }
+  function closeSwapSettings() { swapSettingsPopover.style.display = "none"; }
 
-function updateSwapBalances() {
-  if (!window.ThorPay) return;
-  const fromSym = document.getElementById("swapFromToken").value;
-  const toSym = document.getElementById("swapToToken").value;
-  const fromBalEl = document.getElementById("swapFromBal");
-  const toBalEl = document.getElementById("swapToBal");
-  if (fromBalEl) fromBalEl.innerText = "Balance: " + window.ThorPay.formatBal(window.ThorPay.getBalance(fromSym));
-  if (toBalEl) toBalEl.innerText = "Balance: " + window.ThorPay.formatBal(window.ThorPay.getBalance(toSym));
-}
-updateSwapBalances();
-["swapFromToken", "swapToToken"].forEach(id => {
-  const el = document.getElementById(id);
-  if (el) el.addEventListener("change", updateSwapBalances);
-});
-document.addEventListener("thorpay:balances", updateSwapBalances);
+  const openBtn = document.getElementById("openSwapSettings");
+  if (openBtn) openBtn.addEventListener("click", (e) => { e.stopPropagation(); openSwapSettings(); });
+  document.getElementById("cancelSwapSettings").addEventListener("click", closeSwapSettings);
+  document.addEventListener("click", (e) => {
+    if (swapSettingsPopover.style.display === "block" && !swapSettingsPopover.contains(e.target) && e.target !== openBtn) {
+      closeSwapSettings();
+    }
+  });
+  swapSettingsPopover.addEventListener("click", (e) => e.stopPropagation());
 
-const swapBtn = document.getElementById("swapBtn");
-if (swapBtn) {
-  swapBtn.addEventListener("click", async () => {
-    const statusEl = document.getElementById("swapStatus");
+  document.querySelectorAll("#slippageChips span").forEach(chip => {
+    chip.addEventListener("click", () => {
+      pendingSlippage = Number(chip.dataset.slip);
+      paintSlippageChips(pendingSlippage);
+      slippageCustomInput.value = "";
+      slippageCustomStatus.innerText = "";
+    });
+  });
 
-    let userAddress = window.ThorPay && window.ThorPay.getUserAddress();
-    if (!userAddress) {
-      try {
-        statusEl.className = "status"; statusEl.innerText = "Connecting wallet\u2026";
-        await window.ThorPay.connectWallet();
-      } catch (err) {
-        statusEl.className = "status err";
-        statusEl.innerText = "Wallet connection failed: " + (err.message || err);
+  if (slippageCustomInput) {
+    slippageCustomInput.addEventListener("input", () => {
+      const v = Number(slippageCustomInput.value);
+      if (slippageCustomInput.value && v > 0 && v <= 50) {
+        pendingSlippage = v;
+        paintSlippageChips(-1);
+        slippageCustomStatus.innerText = "";
+      } else {
+        slippageCustomStatus.innerText = slippageCustomInput.value ? "Enter a value between 0.1 and 50" : "";
+        slippageCustomStatus.style.color = "var(--red)";
+      }
+    });
+  }
+
+  document.getElementById("saveSwapSettings").addEventListener("click", () => {
+    if (slippageCustomInput.value) {
+      const v = Number(slippageCustomInput.value);
+      if (!(v > 0 && v <= 50)) {
+        slippageCustomStatus.innerText = "Enter a value between 0.1 and 50";
+        slippageCustomStatus.style.color = "var(--red)";
         return;
       }
-      userAddress = window.ThorPay.getUserAddress();
-      if (!userAddress) { statusEl.className = "status err"; statusEl.innerText = "Connect your wallet first."; return; }
     }
+    selectedSlippage = pendingSlippage;
+    document.getElementById("slippageDisplay").innerText = selectedSlippage + "%";
+    scheduleEstimate();
+    closeSwapSettings();
+  });
 
+  const swapSuccessToast = document.getElementById("swapSuccessToast");
+  let toastTimer = null;
+  function showSuccessToast() {
+    swapSuccessToast.style.display = "block";
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { swapSuccessToast.style.display = "none"; }, 12000);
+  }
+  document.getElementById("closeSwapSuccess").addEventListener("click", () => {
+    clearTimeout(toastTimer);
+    swapSuccessToast.style.display = "none";
+  });
+
+  function updateSwapBalances() {
+    if (!window.ThorPay) return;
+    const fromSym = document.getElementById("swapFromToken").value;
+    const toSym = document.getElementById("swapToToken").value;
+    const fromBalEl = document.getElementById("swapFromBal");
+    const toBalEl = document.getElementById("swapToBal");
+    if (fromBalEl) fromBalEl.innerText = "Balance: " + window.ThorPay.formatBal(window.ThorPay.getBalance(fromSym));
+    if (toBalEl) toBalEl.innerText = "Balance: " + window.ThorPay.formatBal(window.ThorPay.getBalance(toSym));
+  }
+  updateSwapBalances();
+  ["swapFromToken", "swapToToken"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("change", () => { updateSwapBalances(); scheduleEstimate(); });
+  });
+  document.addEventListener("thorpay:balances", updateSwapBalances);
+
+  /* -----------------------------------------------------------------------
+     LI.FI / viem — loaded on demand via dynamic import() so a load failure
+     can't take the UI above down with it. Cached after the first successful
+     load; retried on the next attempt if it failed.
+     ----------------------------------------------------------------------- */
+  let lifiLibsPromise = null;
+  let currentWalletClient = null;
+  let lifiConfigured = false;
+
+  function loadLifiLibs() {
+    if (!lifiLibsPromise) {
+      lifiLibsPromise = Promise.all([
+        import("https://esm.sh/@lifi/sdk"),
+        import("https://esm.sh/viem")
+      ]).then(([lifi, viem]) => ({ lifi, viem })).catch(err => {
+        lifiLibsPromise = null; // allow retrying on the next call instead of caching a permanent failure
+        throw err;
+      });
+    }
+    return lifiLibsPromise;
+  }
+
+  function buildWalletClient(viem) {
+    currentWalletClient = viem.createWalletClient({ chain: ARC_CHAIN, transport: viem.custom(window.ethereum) });
+    return currentWalletClient;
+  }
+
+  async function getLifi() {
+    const { lifi, viem } = await loadLifiLibs();
+    if (!lifiConfigured) {
+      lifi.createConfig({
+        integrator: "ThorPay",
+        providers: [
+          lifi.EVM({
+            getWalletClient: async () => currentWalletClient || buildWalletClient(viem),
+            switchChain: async (chainId) => {
+              if (chainId !== ARC_CHAIN.id) throw new Error("Swap only supports Arc Testnet right now.");
+              return buildWalletClient(viem);
+            }
+          })
+        ]
+      });
+      lifiConfigured = true;
+    }
+    return { lifi, viem };
+  }
+
+  let estimateTimer = null;
+  function scheduleEstimate() {
+    clearTimeout(estimateTimer);
+    estimateTimer = setTimeout(runEstimate, 500);
+  }
+
+  async function runEstimate() {
+    const routeStatus = document.getElementById("swapRouteStatus");
+    const toAmt = document.getElementById("swapToAmt");
     const amt = document.getElementById("swapFromAmt").value;
     const tokenIn = document.getElementById("swapFromToken").value;
     const tokenOut = document.getElementById("swapToToken").value;
-    if (!amt || Number(amt) <= 0) { statusEl.className = "status err"; statusEl.innerText = "Enter an amount."; return; }
-    if (tokenIn === tokenOut) { statusEl.className = "status err"; statusEl.innerText = "Choose two different tokens."; return; }
 
-    const available = window.ThorPay.getBalance(tokenIn);
-    if (available !== null && Number(amt) > available) {
-      statusEl.className = "status err";
-      statusEl.innerText = "Insufficient balance. You have " + window.ThorPay.formatBal(available) + " " + tokenIn + " available.";
+    if (!window.ThorPay || !window.ThorPay.getUserAddress()) {
+      if (routeStatus) routeStatus.innerText = "Connect your wallet to see a live quote";
+      lastQuote = null;
+      return;
+    }
+    if (tokenIn === tokenOut) {
+      toAmt.value = "";
+      if (routeStatus) routeStatus.innerText = "Pick two different tokens";
+      lastQuote = null;
+      return;
+    }
+    if (!amt || Number(amt) <= 0) {
+      toAmt.value = "";
+      if (routeStatus) routeStatus.innerText = "Enter an amount to see a quote";
+      lastQuote = null;
       return;
     }
 
-    swapBtn.disabled = true;
     try {
-      buildWalletClient(); // fresh client bound to the currently-connected account
+      if (routeStatus) routeStatus.innerText = "Loading LI.FI\u2026";
+      const { lifi, viem } = await getLifi();
+      if (routeStatus) routeStatus.innerText = "Fetching route from LI.FI\u2026";
 
-      let quote;
-      if (lastQuote && lastQuote.tokenIn === tokenIn && lastQuote.tokenOut === tokenOut && lastQuote.amt === amt) {
-        quote = lastQuote.quote;
-      } else {
-        statusEl.className = "status"; statusEl.innerText = "Fetching route\u2026";
-        const fromAmountUnits = parseUnits(amt, TOKEN_DECIMALS[tokenIn]).toString();
-        quote = await getQuote({
-          fromChain: ARC_CHAIN.id, toChain: ARC_CHAIN.id,
-          fromToken: TOKEN_ADDR[tokenIn], toToken: TOKEN_ADDR[tokenOut],
-          fromAmount: fromAmountUnits, fromAddress: userAddress,
-          slippage: selectedSlippage / 100
-        });
-      }
-
-      const route = convertQuoteToRoute(quote);
-      let lastTxHash = null;
-
-      statusEl.innerText = "Confirm in your wallet\u2026 (may take 2 steps: approve, then swap)";
-      const executedRoute = await executeRoute(route, {
-        updateRouteHook(updatedRoute) {
-          const step = updatedRoute.steps?.[0];
-          const processes = step?.execution?.process || [];
-          const active = processes[processes.length - 1];
-          if (active) {
-            if (active.txHash) lastTxHash = active.txHash;
-            if (active.status === "PENDING") statusEl.innerText = (active.message || "Waiting for confirmation") + "\u2026";
-            else if (active.status === "FAILED") { statusEl.className = "status err"; statusEl.innerText = active.message || "Step failed."; }
-          }
-        }
+      const fromAmountUnits = viem.parseUnits(amt, TOKEN_DECIMALS[tokenIn]).toString();
+      const quote = await lifi.getQuote({
+        fromChain: ARC_CHAIN.id, toChain: ARC_CHAIN.id,
+        fromToken: TOKEN_ADDR[tokenIn], toToken: TOKEN_ADDR[tokenOut],
+        fromAmount: fromAmountUnits, fromAddress: window.ThorPay.getUserAddress(),
+        slippage: selectedSlippage / 100
       });
 
-      const finalStep = executedRoute.steps?.[executedRoute.steps.length - 1];
-      const finalProcesses = finalStep?.execution?.process || [];
-      const doneProcess = [...finalProcesses].reverse().find(p => p.txHash) || finalProcesses[finalProcesses.length - 1];
-      if (doneProcess?.txHash) lastTxHash = doneProcess.txHash;
-
-      const receivedRaw = finalStep?.execution?.toAmount || quote.estimate.toAmount;
-      const receivedAmount = Number(formatUnits(BigInt(receivedRaw), TOKEN_DECIMALS[tokenOut]));
-
-      statusEl.className = ""; statusEl.innerText = "";
-      window.ThorPay.addHistory("SWAP", amt + " " + tokenIn + " \u2192 " + receivedAmount.toFixed(6) + " " + tokenOut, lastTxHash);
-      await window.ThorPay.refreshBalances();
-      document.getElementById("swapFromAmt").value = "";
-      document.getElementById("swapToAmt").value = "";
-      lastQuote = null;
-
-      document.getElementById("successAmount").innerText = receivedAmount.toFixed(6) + " " + tokenOut;
-      const explorerBtn = document.getElementById("viewOnExplorerBtn");
-      explorerBtn.href = lastTxHash ? window.ThorPay.explorerTxUrl(lastTxHash) : (ARC_CHAIN.blockExplorers.default.url);
-      showSuccessToast();
+      const outAmount = Number(viem.formatUnits(BigInt(quote.estimate.toAmount), TOKEN_DECIMALS[tokenOut]));
+      toAmt.value = outAmount.toFixed(6);
+      if (routeStatus) routeStatus.innerText = "\u2248 " + outAmount.toFixed(6) + " " + tokenOut + " via " + (quote.toolDetails?.name || "LI.FI");
+      lastQuote = { tokenIn, tokenOut, amt, outAmount, quote };
     } catch (err) {
-      console.error("swap failed", err);
-      statusEl.className = "status err";
+      console.error("LI.FI quote failed", err);
+      toAmt.value = "";
+      lastQuote = null;
       const msg = err.message || String(err);
-      statusEl.innerText = /^swap failed/i.test(msg) ? msg : ("Swap failed: " + msg);
-    } finally {
-      swapBtn.disabled = false;
+      if (routeStatus) routeStatus.innerText = "Couldn't fetch a route: " + msg;
     }
-  });
-}
+  }
+
+  const fromAmtEl = document.getElementById("swapFromAmt");
+  if (fromAmtEl) fromAmtEl.addEventListener("input", scheduleEstimate);
+
+  const swapBtn = document.getElementById("swapBtn");
+  if (swapBtn) {
+    swapBtn.addEventListener("click", async () => {
+      const statusEl = document.getElementById("swapStatus");
+
+      let userAddress = window.ThorPay && window.ThorPay.getUserAddress();
+      if (!userAddress) {
+        try {
+          statusEl.className = "status"; statusEl.innerText = "Connecting wallet\u2026";
+          await window.ThorPay.connectWallet();
+        } catch (err) {
+          statusEl.className = "status err";
+          statusEl.innerText = "Wallet connection failed: " + (err.message || err);
+          return;
+        }
+        userAddress = window.ThorPay.getUserAddress();
+        if (!userAddress) { statusEl.className = "status err"; statusEl.innerText = "Connect your wallet first."; return; }
+      }
+
+      const amt = document.getElementById("swapFromAmt").value;
+      const tokenIn = document.getElementById("swapFromToken").value;
+      const tokenOut = document.getElementById("swapToToken").value;
+      if (!amt || Number(amt) <= 0) { statusEl.className = "status err"; statusEl.innerText = "Enter an amount."; return; }
+      if (tokenIn === tokenOut) { statusEl.className = "status err"; statusEl.innerText = "Choose two different tokens."; return; }
+
+      const available = window.ThorPay.getBalance(tokenIn);
+      if (available !== null && Number(amt) > available) {
+        statusEl.className = "status err";
+        statusEl.innerText = "Insufficient balance. You have " + window.ThorPay.formatBal(available) + " " + tokenIn + " available.";
+        return;
+      }
+
+      swapBtn.disabled = true;
+      try {
+        statusEl.className = "status"; statusEl.innerText = "Loading LI.FI\u2026";
+        const { lifi, viem } = await getLifi();
+        buildWalletClient(viem); // fresh client bound to the currently-connected account
+
+        let quote;
+        if (lastQuote && lastQuote.tokenIn === tokenIn && lastQuote.tokenOut === tokenOut && lastQuote.amt === amt) {
+          quote = lastQuote.quote;
+        } else {
+          statusEl.innerText = "Fetching route\u2026";
+          const fromAmountUnits = viem.parseUnits(amt, TOKEN_DECIMALS[tokenIn]).toString();
+          quote = await lifi.getQuote({
+            fromChain: ARC_CHAIN.id, toChain: ARC_CHAIN.id,
+            fromToken: TOKEN_ADDR[tokenIn], toToken: TOKEN_ADDR[tokenOut],
+            fromAmount: fromAmountUnits, fromAddress: userAddress,
+            slippage: selectedSlippage / 100
+          });
+        }
+
+        const route = lifi.convertQuoteToRoute(quote);
+        let lastTxHash = null;
+
+        statusEl.innerText = "Confirm in your wallet\u2026 (may take 2 steps: approve, then swap)";
+        const executedRoute = await lifi.executeRoute(route, {
+          updateRouteHook(updatedRoute) {
+            const step = updatedRoute.steps?.[0];
+            const processes = step?.execution?.process || [];
+            const active = processes[processes.length - 1];
+            if (active) {
+              if (active.txHash) lastTxHash = active.txHash;
+              if (active.status === "PENDING") statusEl.innerText = (active.message || "Waiting for confirmation") + "\u2026";
+              else if (active.status === "FAILED") { statusEl.className = "status err"; statusEl.innerText = active.message || "Step failed."; }
+            }
+          }
+        });
+
+        const finalStep = executedRoute.steps?.[executedRoute.steps.length - 1];
+        const finalProcesses = finalStep?.execution?.process || [];
+        const doneProcess = [...finalProcesses].reverse().find(p => p.txHash) || finalProcesses[finalProcesses.length - 1];
+        if (doneProcess?.txHash) lastTxHash = doneProcess.txHash;
+
+        const receivedRaw = finalStep?.execution?.toAmount || quote.estimate.toAmount;
+        const receivedAmount = Number(viem.formatUnits(BigInt(receivedRaw), TOKEN_DECIMALS[tokenOut]));
+
+        statusEl.className = ""; statusEl.innerText = "";
+        window.ThorPay.addHistory("SWAP", amt + " " + tokenIn + " \u2192 " + receivedAmount.toFixed(6) + " " + tokenOut, lastTxHash);
+        await window.ThorPay.refreshBalances();
+        document.getElementById("swapFromAmt").value = "";
+        document.getElementById("swapToAmt").value = "";
+        lastQuote = null;
+
+        document.getElementById("successAmount").innerText = receivedAmount.toFixed(6) + " " + tokenOut;
+        const explorerBtn = document.getElementById("viewOnExplorerBtn");
+        explorerBtn.href = lastTxHash ? window.ThorPay.explorerTxUrl(lastTxHash) : ARC_CHAIN.blockExplorers.default.url;
+        showSuccessToast();
+      } catch (err) {
+        console.error("swap failed", err);
+        statusEl.className = "status err";
+        const msg = err.message || String(err);
+        statusEl.innerText = /^swap failed/i.test(msg) ? msg : ("Swap failed: " + msg);
+      } finally {
+        swapBtn.disabled = false;
+      }
+    });
+  }
+})();
 </script>
 </body>
 </html>
