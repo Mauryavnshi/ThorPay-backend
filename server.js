@@ -24,15 +24,31 @@
    wallet. That's normal for a relayer/facilitator pattern, but it means
    this wallet's private key and this server's integrity matter. Testnet
    only — never point this at real funds.
+
+   ---------------------------------------------------------------------
+   ESM NOTE (fix for Vercel ERR_REQUIRE_ESM):
+   @circle-fin/app-kit, @circle-fin/adapter-viem-v2, and viem now ship as
+   pure ESM. Node's CommonJS require() cannot load a pure-ESM package, so
+   this file (and package.json) were converted to native ESM ("type":
+   "module"). __dirname / __filename don't exist in ESM, so they're
+   rebuilt below via import.meta.url. Everything else — routes, CORS,
+   env vars, relayer key handling, token addresses, security checks — is
+   unchanged.
    ========================================================================== */
 
-require("dotenv").config();
-const express = require("express");
-const cors = require("cors");
-const fs = require("fs");
-const path = require("path");
-const { ethers } = require("ethers");
-const { AppKit } = require("@circle-fin/app-kit");
+import "dotenv/config";
+import express from "express";
+import cors from "cors";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { ethers } from "ethers";
+import { AppKit } from "@circle-fin/app-kit";
+import { createPublicClient, createWalletClient, http, fallback } from "viem";
+
+// ESM has no __dirname/__filename — rebuild them from import.meta.url.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json());
@@ -99,10 +115,12 @@ console.log("  " + relayerWallet.address);
 const kit = new AppKit();
 let relayerAdapter = null;
 
-const { createPublicClient, createWalletClient, http, fallback } = require("viem");
+// Optional chain definition — kept as a soft dependency (matches original
+// try/catch require behavior) but as a top-level await dynamic import,
+// since ESM has no synchronous require() to fall back on.
 let ArcTestnetChain = null;
 try {
-  ({ ArcTestnet: ArcTestnetChain } = require("@circle-fin/app-kit/chains"));
+  ({ ArcTestnet: ArcTestnetChain } = await import("@circle-fin/app-kit/chains"));
 } catch (e) {
   console.warn("Could not load ArcTestnet chain definition from @circle-fin/app-kit/chains — falling back to App Kit's default chain resolution.", e.message);
 }
@@ -124,7 +142,7 @@ function arcTransport() {
 
 async function getRelayerAdapter() {
   if (relayerAdapter) return relayerAdapter;
-  const adapterModule = require("@circle-fin/adapter-viem-v2");
+  const adapterModule = await import("@circle-fin/adapter-viem-v2");
   // Confirmed via https://docs.arc.io/app-kit/quickstarts/swap-tokens-same-chain —
   // createViemAdapterFromPrivateKey is the official name. Falling back to
   // createAdapterFromPrivateKey just in case an older/newer package version
@@ -203,6 +221,15 @@ async function withRpcRetry(fn, { retries = 7, baseDelayMs = 2000 } = {}) {
    Very small in-memory + on-disk replay guard. Good enough for a testnet
    demo relayer — swap it for a real database before this ever touches
    anything with value.
+
+   NOTE: Vercel's serverless filesystem is read-only except for /tmp, and
+   /tmp is not guaranteed to persist between invocations. This on-disk
+   guard is best-effort exactly as it was before conversion — if you're
+   deploying this to Vercel's serverless functions (rather than a
+   persistent Node server elsewhere), point PROCESSED_FILE at /tmp or move
+   this to a real datastore, since the project directory itself won't be
+   writable there. No behavior was changed here — just flagging it since
+   it's adjacent to the ERR_REQUIRE_ESM fix.
    ------------------------------------------------------------------------- */
 const PROCESSED_FILE = path.join(__dirname, "processed-deposits.json");
 let processed = new Set();
@@ -390,3 +417,9 @@ app.post("/api/swap", rateLimit, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`ThorPay Swap Relayer listening on port ${PORT}`);
 });
+
+// Exported for platforms (e.g. Vercel serverless functions) that expect a
+// request-handler export rather than an app.listen() call — harmless no-op
+// for a normal Node server, but makes the file usable either way without
+// further changes.
+export default app;
